@@ -11,6 +11,20 @@ Maps each major original-prompt requirement to concrete backend test files and p
 
 ---
 
+## 0. Post-Audit Remediation Snapshot (Static)
+
+- All 44 endpoint gaps identified in `.tmp/test_coverage_and_readme_audit_report.md` now have direct `app.inject` coverage in depth suites.
+- Added endpoint-complete coverage for parameterized/detail/mutation routes across admin, CMS, membership, outbound, strategy, and warehouse domains.
+- Removed the prior API-suite mocking exception in `api/admin.depth.test.ts`; fail-closed behavior is now validated through strict-mode runtime configuration without dependency mocking.
+- Added repository-layer unit coverage in:
+	- `unit/repositories/warehouse.repository.test.ts`
+	- `unit/repositories/membership.repository.test.ts`
+	- `unit/repositories/outbound.repository.test.ts`
+	- `unit/repositories/strategy.repository.test.ts`
+- Updated `repo/README.md` and `repo/run_tests.sh` to align with the Docker-first execution model and backend-only project classification.
+
+---
+
 ## 1. Authentication & Roles
 
 | Requirement | Test File | Primary Assertion |
@@ -39,8 +53,8 @@ Maps each major original-prompt requirement to concrete backend test files and p
 
 | Requirement | Test File | Primary Assertion |
 |---|---|---|
-| Facility CRUD | `api/warehouse.test.ts` | POST /api/warehouse/facilities missing name → 400 |
-| Zone CRUD | `api/warehouse.test.ts` | GET /api/warehouse/zones → 401 without token |
+| Facility CRUD | `api/warehouse.test.ts`, `api/warehouse.depth.test.ts` | Validation failures in baseline suite plus DB-backed GET/PATCH/DELETE by facilityId in depth suite |
+| Zone CRUD | `api/warehouse.depth.test.ts` | POST/GET zone endpoints under `/api/warehouse/facilities/:facilityId/zones` validate create/list/detail semantics |
 | Location CRUD — code uniqueness | `api/warehouse.test.ts` | POST /api/warehouse/locations missing capacityCuFt → 400 |
 | Location capacity (exclusiveMinimum: 0) | `api/warehouse.test.ts` | POST /api/warehouse/locations capacityCuFt=0 → 400 |
 | Location hazard class | `api/warehouse.test.ts` | POST /api/warehouse/locations invalid hazardClass → 400 |
@@ -59,6 +73,10 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | CONFIRMED → RESCHEDULED (reschedule) | `unit/warehouse/appointment.test.ts` | isValidAppointmentTransition(CONFIRMED, RESCHEDULED) = true |
 | Facility create role gate (manager-only) | `api/warehouse.depth.test.ts` | WAREHOUSE_OPERATOR receives 403, WAREHOUSE_MANAGER receives 201 |
 | Illegal appointment transition returns 409 | `api/warehouse.depth.test.ts` | PENDING → RESCHEDULED rejected with INVALID_TRANSITION |
+| Location detail + mutation endpoints | `api/warehouse.depth.test.ts` | GET/PATCH `/api/warehouse/locations/:locationId` returns persisted updates |
+| SKU detail + mutation endpoints | `api/warehouse.depth.test.ts` | GET/PATCH `/api/warehouse/skus/:skuId` returns updated SKU fields |
+| Inventory lot detail + mutation endpoints | `api/warehouse.depth.test.ts` | GET/PATCH `/api/warehouse/inventory-lots/:lotId` validates quantity updates and retrieval |
+| Appointment detail + lifecycle commands | `api/warehouse.depth.test.ts` | GET by id plus confirm/cancel command endpoints return expected state transitions |
 
 ---
 
@@ -81,6 +99,9 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | Backorder line (BACKORDER lineType, sourceLineId FK) | `unit/outbound/shortageHandling.test.ts`, `unit/enums.test.ts` | OrderLineType.BACKORDER exists |
 | Manager approval for partial shipment | `api/outbound.test.ts`, `api/outbound.depth.test.ts` | unauthorized guard plus APPROVAL_REQUIRED before approval and successful handoff after approval |
 | Handoff recording | `api/outbound.test.ts` | POST /api/outbound/orders/:id/handoff missing carrier → 400 |
+| Order detail endpoint | `api/outbound.depth.test.ts` | GET `/api/outbound/orders/:orderId` returns order lines and status fields |
+| Wave detail + cancellation endpoint | `api/outbound.depth.test.ts` | GET `/api/outbound/waves/:waveId` and PATCH cancel command both return expected wave status |
+| Exception-driven backorder creation | `api/outbound.depth.test.ts` | POST exceptions adds a `BACKORDER` line linked to source line |
 
 ---
 
@@ -99,6 +120,8 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | Pick score: expired lot gets highest FEFO | `unit/strategy/scoring.test.ts` | expired lot > valid lot with fefoWeight=1 |
 | Putaway rank endpoint | `api/strategy.test.ts`, `api/strategy.depth.test.ts` | Schema validation plus DB-backed ranking success for compatible facility/sku |
 | Pick-path endpoint | `api/strategy.test.ts` | POST /api/strategy/pick-path missing facilityId/pickTaskIds → 400 |
+| Ruleset detail + mutation endpoints | `api/strategy.depth.test.ts` | GET/PATCH `/api/strategy/rulesets/:rulesetId` returns persisted ruleset changes |
+| DB-backed pick-path plan quality | `api/strategy.depth.test.ts` | POST `/api/strategy/pick-path` returns ordered sequence with stable non-negative score |
 | 30-day simulation | `api/strategy.test.ts`, `api/strategy.depth.test.ts` | Schema validation plus DB-backed simulation success with deterministic envelope fields |
 | Simulation: local data only, deterministic | `unit/strategy/scoring.test.ts` | All scoring functions are pure (no DB) |
 | Simulation step-distance: structural zone+type metric (replaces string-prefix heuristic) | `unit/strategy/scoring.test.ts` | `estimatePickStepDistance` tests: same location→0, same zone→0.5, different zone→1.0, type-delta penalty, symmetric |
@@ -118,6 +141,10 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | STORED_VALUE requires storedValue | `unit/membership/membershipRules.test.ts` | validatePackageTypeRequiredFields('STORED_VALUE', {}) returns error |
 | BUNDLE has no extra requirements | `unit/membership/membershipRules.test.ts` | validatePackageTypeRequiredFields('BUNDLE', {}) returns null |
 | Package price exclusiveMinimum: 0 | `api/membership.test.ts` | POST packages price=0 → 400 |
+| Member detail + mutation endpoints | `api/membership.depth.test.ts` | GET/PATCH/DELETE `/api/membership/members/:memberId` exercises lifecycle and update semantics |
+| Member enrollments detail endpoint | `api/membership.depth.test.ts` | GET `/api/membership/members/:memberId/enrollments` returns enrollment rows for the member |
+| Package detail + mutation endpoints | `api/membership.depth.test.ts` | GET/PATCH `/api/membership/packages/:packageId` persists package metadata updates |
+| Payment detail endpoint | `api/membership.depth.test.ts` | GET `/api/membership/payments/:paymentId` enforces role-aware masking semantics |
 | Enrollment (ACTIVE, SUSPENDED, EXPIRED, CANCELLED) | `unit/membership/membershipRules.test.ts` | EnrollmentStatus has 4 values |
 | Enrollment: requires packageId + startDate | `api/membership.test.ts` | POST enrollments missing packageId → 400; missing startDate → 400 |
 | Invoice number format (GC-YYYYMMDD-NNNNN) | `unit/invariants.test.ts`, `unit/membership/invoice.test.ts` | generateInvoiceNumber format verified |
@@ -161,6 +188,9 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | Tag cloud | `api/cms.test.ts` | GET /api/cms/tags/cloud → 401 without token |
 | Reviewer-gated approve/publish transitions | `api/cms.depth.test.ts` | non-reviewer approve → 403; reviewer transitions to APPROVED/PUBLISHED |
 | Scheduled publish transition eligibility | `api/cms.depth.test.ts` | reviewer schedules APPROVED article to SCHEDULED with future timestamp |
+| Article/category/tag detail endpoints | `api/cms.depth.test.ts` | GET `/api/cms/articles/:articleId`, `/api/cms/categories/:categoryId`, `/api/cms/tags/:tagId` return persisted entities |
+| Reviewer lifecycle commands: reject + withdraw | `api/cms.depth.test.ts` | POST reject and withdraw commands enforce valid state transitions |
+| Tag analytics endpoints (success semantics) | `api/cms.depth.test.ts` | GET trending/cloud endpoints return non-empty deterministic payload shape after seeded interactions |
 
 ---
 
@@ -181,16 +211,17 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | Purge billing → confirm required | `api/admin.test.ts` | POST /api/admin/retention/purge-billing missing confirm → 400 |
 | Purge operational → confirm required | `api/admin.test.ts` | POST /api/admin/retention/purge-operational missing confirm → 400 |
 | Parameter key format (^[a-zA-Z0-9._:-]+$) | `unit/admin/parameterKey.test.ts` | isValidParameterKey covers valid/invalid patterns |
-| Parameter CRUD → SYSTEM_ADMIN + allowlist required | `api/admin.test.ts`, `api/admin.depth.test.ts` | GET/POST /api/admin/parameters → 401 without token; WAREHOUSE_MANAGER GET is 403; SYSTEM_ADMIN GET is 200 |
+| Parameter CRUD → SYSTEM_ADMIN + allowlist required | `api/admin.test.ts`, `api/admin.depth.test.ts` | Collection and key-scoped GET/PUT/DELETE endpoints enforce role/allowlist constraints and persist updates |
 | Parameter: key required | `api/admin.test.ts` | POST /api/admin/parameters missing key → 400 |
 | Parameter: key invalid chars | `api/admin.test.ts` | POST /api/admin/parameters key with spaces → 400 |
 | IP allowlist CRUD → auth required | `api/admin.test.ts` | GET/POST /api/admin/ip-allowlist → 401 without token |
+| IP allowlist detail/mutation endpoints | `api/admin.depth.test.ts` | PATCH/DELETE `/api/admin/ip-allowlist/:entryId` update status and remove entries |
 | IP allowlist: cidr + routeGroup required | `api/admin.test.ts` | POST missing cidr/routeGroup → 400 |
 | IP allowlist: routeGroup enum | `api/admin.test.ts` | POST invalid routeGroup → 400 |
 | Key rotation → auth required | `api/admin.test.ts` | POST /api/admin/key-versions/rotate → 401 without token |
 | Key rotation: keyHash required | `api/admin.test.ts` | POST missing keyHash → 400 |
 | Diagnostics endpoint → auth required | `api/admin.test.ts` | GET /api/admin/diagnostics → 401 without token |
-| Allowlist lookup errors fail closed | `api/admin.depth.test.ts` | GET /api/admin/diagnostics returns 500 INTERNAL_ERROR when `ipAllowlistEntry.findMany` throws |
+| Strict-mode allowlist fail-closed behavior | `api/admin.depth.test.ts`, `unit/security/ipallowlist.test.ts` | With `IP_ALLOWLIST_STRICT_MODE=true` and no active entries, diagnostics request is denied with `IP_BLOCKED` |
 | Structured domain logging | `unit/logging/logger.test.ts` | createDomainLogger calls child() with {domain}; all 10 domains covered |
 | Domain logging adoption (all route plugins + schedulers + backup/retention sub-domains) | `src/routes/*.routes.ts` (tagRequestLogDomain at each plugin), `src/app.ts` (scheduler wiring), `src/routes/admin.routes.ts` (backup/retention sub-domain loggers) | 7 route plugins emit `{ domain }`-tagged request logs; backup and restore handlers use `'backup'` child loggers; purge handlers use `'retention'` child loggers |
 | Backup restore happy path + tamper detection + admin IP blocking | `api/admin.depth.test.ts` | restore success (200), tampered snapshot restore fails VALIDATION_FAILED, diagnostics blocked with IP_BLOCKED when allowlist excludes caller |
@@ -216,9 +247,10 @@ Maps each major original-prompt requirement to concrete backend test files and p
 
 | Requirement | Test File | Notes |
 |---|---|---|
-| Unit tests in unit_tests/ | `repo/backend/unit_tests/**/*.test.ts` | 27 test files covering pure functions and security primitives |
+| Unit tests in unit_tests/ | `repo/backend/unit_tests/**/*.test.ts` | 33 test files covering security primitives, domain invariants, schedulers, and repository contracts |
 | API tests in api_tests/ | `repo/backend/api_tests/**/*.test.ts` | 17 test files: baseline contracts + depth suites + validation envelope |
-| Docker-first test runner | `repo/run_tests.sh` | 4-step: build → migrate → unit tests → API tests |
+| Repository-layer unit coverage | `repo/backend/unit_tests/repositories/*.test.ts` | Warehouse, membership, outbound, and strategy repository contracts are unit-tested with Prisma doubles |
+| Docker-first test runner | `repo/run_tests.sh` | 4-step: build → migrate → unit tests → API tests, with Docker/compose preflight checks |
 | DB migration before API tests | `repo/run_tests.sh` | `prisma migrate deploy` in step 2 |
 | Vitest unit config | `repo/backend/vitest.unit.config.ts` | includes: `unit_tests/**/*.test.ts` |
 | Vitest API config | `repo/backend/vitest.api.config.ts` | includes: `api_tests/**/*.test.ts` |
@@ -254,6 +286,8 @@ Attestation that each audit checkpoint has a corresponding evidence source in th
 | Security boundaries (auth + RBAC + rate + IP + audit + mask + encrypt) | `unit/security/*.test.ts` (6 files), `api/*.test.ts` 401 coverage across all protected routes, `unit/audit/audit.test.ts`, `unit/admin/backup.test.ts` |
 | Append-only audit events | `src/audit/audit.ts`, `unit/audit/audit.test.ts` |
 | Log redaction | `src/app.ts` Pino redact paths, `unit/logging/logger.test.ts` |
+| Endpoint closure from prior static audit (44/44) | `api/admin.depth.test.ts`, `api/cms.depth.test.ts`, `api/membership.depth.test.ts`, `api/outbound.depth.test.ts`, `api/strategy.depth.test.ts`, `api/warehouse.depth.test.ts` |
+| API-suite mocking exception removed | `api/admin.depth.test.ts` now validates strict-mode fail-closed behavior without `vi.spyOn(...).mockRejectedValueOnce(...)` |
 | Business-logic presence (FSMs, idempotency, variance, shortage, strategy, CMS, tags) | See sections 1–10 above — depth suites add DB-backed assertions for critical paths |
 | Backup + restore path-traversal prevention | `unit/admin/backup.test.ts` (validateSnapshotPath, GCM tamper detection) |
 | Retention (7y billing / 2y operational) | `unit/admin/retention.test.ts`, `api/admin.test.ts` confirm routes |

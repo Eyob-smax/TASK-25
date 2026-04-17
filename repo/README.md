@@ -2,6 +2,9 @@
 
 Backend-only API for running an offline environmental supply warehouse paired with a local publishing and membership program. Designed for single-node Docker operation with zero external dependencies.
 
+**Project Type:** pure_backend
+**Deployment Model:** single-node Docker container
+
 ## Technology Stack
 
 | Component | Technology | Version |
@@ -58,6 +61,15 @@ This service is designed to run entirely offline on a single machine:
 - **No cloud services** — no hosted queues, schedulers, or identity providers
 - **No network dependencies** — all scheduling, encryption, and backup operations are local
 - **Single Docker container** — `docker-compose.yml` defines one `backend` service
+
+## Docker-First Development Model
+
+This project is Docker-first by design:
+
+- Run application, migrations, scripts, and tests inside Docker containers
+- Keep host setup minimal (Docker Engine / Docker Desktop + `docker compose`)
+- Avoid host-local Node.js package installs for routine workflows
+- Use `docker compose run` / `docker compose exec` commands documented below
 
 ## Domain Model
 
@@ -133,25 +145,28 @@ Implemented:
   - Diagnostics endpoint (`/diagnostics`): process memory, uptime, live DB record counts, key version status, performance design notes
   - Structured logging: `createDomainLogger(logger, domain)` utility for per-subsystem log filtering
 
-## Quick Start (Local Development)
+## Quick Start (Docker)
 
 ```bash
-cd backend
-npm install
+cd repo
 
 # Generate a 64-hex-char master key once and export it for the current shell
 export ENCRYPTION_MASTER_KEY=$(openssl rand -hex 32)
 
-# Apply the Prisma schema to the local SQLite file
-npx prisma migrate deploy
+# Start API service
+docker compose up --build -d backend
 
-# Seed the first SYSTEM_ADMIN user (idempotent — safe to re-run)
-BOOTSTRAP_ADMIN_USERNAME=admin \
-BOOTSTRAP_ADMIN_PASSWORD='ChangeMeStrong123!' \
-  npm run seed:admin
+# Apply Prisma migrations in container
+docker compose run --rm --no-deps backend npx prisma migrate deploy
 
-# Start the API
-npx tsx src/index.ts
+# Seed the first SYSTEM_ADMIN user (idempotent)
+docker compose run --rm --no-deps \
+  -e BOOTSTRAP_ADMIN_USERNAME=admin \
+  -e BOOTSTRAP_ADMIN_PASSWORD='ChangeMeStrong123!' \
+  backend npm run seed:admin
+
+# View logs
+docker compose logs -f backend
 ```
 
 The server listens on `http://0.0.0.0:3000` by default. After bootstrap, the seeded admin can issue a session via `POST /api/auth/login` and create further users through `POST /api/auth/users`.
@@ -199,6 +214,22 @@ Response:
 - **Audit trail:** Append-only events with SHA-256 before/after digests.
 - **Log safety:** Pino redacts `Authorization`, `password`, `currentPassword`, `newPassword`, `last4` fields.
 
+## Service Architecture
+
+- **API Server:** Fastify app serving domain routes under `/api/*` plus `/health`.
+- **Background Scheduler (Warehouse):** appointment expiry pass auto-transitions stale PENDING appointments.
+- **Background Scheduler (CMS):** scheduled article publish pass transitions due SCHEDULED articles.
+- **Persistence:** single-node SQLite via Prisma.
+
+## Data Retention Policy
+
+| Data Category | Retention Window | Purge Endpoint |
+|---|---|---|
+| Billing records (`PaymentRecord`) | 7 years | `POST /api/admin/retention/purge-billing` |
+| Operational logs (`AuditEvent`, `AppointmentOperationHistory`) | 2 years | `POST /api/admin/retention/purge-operational` |
+
+Retention purges are explicit admin actions. Soft-deleted records become hard-delete candidates only after retention windows elapse.
+
 ## Test Directories
 
 - `backend/unit_tests/` — Vitest unit tests (pure-function and security primitive coverage)
@@ -213,9 +244,11 @@ Response:
 chmod +x run_tests.sh
 ./run_tests.sh
 
-# Local unit tests only (no DB required)
-cd backend
-npx vitest run --config vitest.unit.config.ts
+# Unit tests only (Docker-first)
+docker compose run --rm --no-deps backend npx vitest run --config vitest.unit.config.ts
+
+# API tests only (Docker-first)
+docker compose run --rm --no-deps backend npx vitest run --config vitest.api.config.ts
 ```
 
 ## Docker
@@ -231,8 +264,8 @@ docker compose up --build
 ./run_tests.sh
 ```
 
-> **Lockfile:** for fully reproducible Docker builds, run `npm install` once inside
-> `repo/backend/` to generate `package-lock.json` and commit it. The Dockerfile
+> **Lockfile:** for fully reproducible Docker builds, run package install inside
+> the backend container to generate `package-lock.json` and commit it. The Dockerfile
 > prefers `npm ci` when a lockfile is present and falls back to `npm install`
 > otherwise, so the build still succeeds without it.
 

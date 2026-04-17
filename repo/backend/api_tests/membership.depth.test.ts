@@ -15,6 +15,43 @@ describe('Membership depth — role authorization and masking behavior', () => {
     await app.close();
   });
 
+  async function createMember(token: string, prefix = 'MEM') {
+    const memberNumber = `${prefix}-${randomUUID().slice(0, 8)}`;
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/membership/members',
+      headers: authHeader(token),
+      payload: {
+        memberNumber,
+        firstName: 'Depth',
+        lastName: 'Member',
+        email: `depth-${randomUUID().slice(0, 8)}@example.com`,
+        phone: '5551234567',
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    return {
+      memberNumber,
+      memberId: JSON.parse(response.payload).data.id as string,
+    };
+  }
+
+  async function createPackage(token: string, suffix = randomUUID().slice(0, 6)) {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/membership/packages',
+      headers: authHeader(token),
+      payload: {
+        name: `Depth Package ${suffix}`,
+        type: 'TERM',
+        price: 129.99,
+        durationDays: 30,
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    return JSON.parse(response.payload).data.id as string;
+  }
+
   it('membership manager sees unmasked member number; warehouse operator is forbidden', async () => {
     const membershipManager = await seedUserWithSession(app, ['MEMBERSHIP_MANAGER']);
     const warehouseOperator = await seedUserWithSession(app, ['WAREHOUSE_OPERATOR']);
@@ -100,5 +137,108 @@ describe('Membership depth — role authorization and masking behavior', () => {
     });
     expect(asMembershipManager.statusCode).toBe(200);
     expect(JSON.parse(asMembershipManager.payload).data.last4).toBeNull();
+  });
+
+  it('covers member get/update/delete lifecycle and enrollment listing', async () => {
+    const membershipManager = await seedUserWithSession(app, ['MEMBERSHIP_MANAGER']);
+    const systemAdmin = await seedUserWithSession(app, ['SYSTEM_ADMIN']);
+
+    const { memberNumber, memberId } = await createMember(membershipManager.token, 'LIFECYCLE');
+
+    const getMember = await app.inject({
+      method: 'GET',
+      url: `/api/membership/members/${memberId}`,
+      headers: authHeader(membershipManager.token),
+    });
+    expect(getMember.statusCode).toBe(200);
+    const getMemberBody = JSON.parse(getMember.payload);
+    expect(getMemberBody.data.id).toBe(memberId);
+    expect(getMemberBody.data.memberNumber).toBe(memberNumber);
+
+    const patchMember = await app.inject({
+      method: 'PATCH',
+      url: `/api/membership/members/${memberId}`,
+      headers: authHeader(membershipManager.token),
+      payload: {
+        firstName: 'DepthUpdated',
+        lastName: 'MemberUpdated',
+        isActive: true,
+      },
+    });
+    expect(patchMember.statusCode).toBe(200);
+    const patchMemberBody = JSON.parse(patchMember.payload);
+    expect(patchMemberBody.data.firstName).toBe('DepthUpdated');
+    expect(patchMemberBody.data.lastName).toBe('MemberUpdated');
+
+    const packageId = await createPackage(membershipManager.token);
+
+    const createEnrollment = await app.inject({
+      method: 'POST',
+      url: `/api/membership/members/${memberId}/enrollments`,
+      headers: authHeader(membershipManager.token),
+      payload: {
+        packageId,
+        startDate: new Date().toISOString(),
+      },
+    });
+    expect(createEnrollment.statusCode).toBe(201);
+
+    const listEnrollments = await app.inject({
+      method: 'GET',
+      url: `/api/membership/members/${memberId}/enrollments`,
+      headers: authHeader(membershipManager.token),
+    });
+    expect(listEnrollments.statusCode).toBe(200);
+    const enrollmentBody = JSON.parse(listEnrollments.payload);
+    expect(Array.isArray(enrollmentBody.data)).toBe(true);
+    expect(enrollmentBody.data.length).toBeGreaterThan(0);
+    expect(enrollmentBody.data[0].memberId).toBe(memberId);
+
+    const deleteMember = await app.inject({
+      method: 'DELETE',
+      url: `/api/membership/members/${memberId}`,
+      headers: authHeader(systemAdmin.token),
+    });
+    expect(deleteMember.statusCode).toBe(204);
+
+    const getDeletedMember = await app.inject({
+      method: 'GET',
+      url: `/api/membership/members/${memberId}`,
+      headers: authHeader(membershipManager.token),
+    });
+    expect(getDeletedMember.statusCode).toBe(404);
+    expect(JSON.parse(getDeletedMember.payload).error.code).toBe('NOT_FOUND');
+  });
+
+  it('covers package detail and update endpoints', async () => {
+    const membershipManager = await seedUserWithSession(app, ['MEMBERSHIP_MANAGER']);
+
+    const packageId = await createPackage(membershipManager.token);
+
+    const getPackage = await app.inject({
+      method: 'GET',
+      url: `/api/membership/packages/${packageId}`,
+      headers: authHeader(membershipManager.token),
+    });
+    expect(getPackage.statusCode).toBe(200);
+    const getPackageBody = JSON.parse(getPackage.payload);
+    expect(getPackageBody.data.id).toBe(packageId);
+    expect(getPackageBody.data.type).toBe('TERM');
+
+    const patchPackage = await app.inject({
+      method: 'PATCH',
+      url: `/api/membership/packages/${packageId}`,
+      headers: authHeader(membershipManager.token),
+      payload: {
+        name: 'Depth Package Updated',
+        price: 149.99,
+        isActive: false,
+      },
+    });
+    expect(patchPackage.statusCode).toBe(200);
+    const patchPackageBody = JSON.parse(patchPackage.payload);
+    expect(patchPackageBody.data.name).toBe('Depth Package Updated');
+    expect(patchPackageBody.data.price).toBe(149.99);
+    expect(patchPackageBody.data.isActive).toBe(false);
   });
 });

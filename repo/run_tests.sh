@@ -19,6 +19,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Keep compose output stable in scripted contexts where orphan warnings may
+# otherwise surface as shell-level errors.
+export COMPOSE_IGNORE_ORPHANS=True
+
+# Fail fast with explicit diagnostics before running build/test steps.
+if ! docker compose version >/dev/null 2>&1; then
+  echo "ERROR: docker compose is not available. Install Docker and ensure 'docker compose' works."
+  exit 1
+fi
+
+if [ ! -f "docker-compose.yml" ]; then
+  echo "ERROR: docker-compose.yml not found. Run this script from the repo/ directory."
+  exit 1
+fi
+
+# Isolated test database path inside the backend container.
 TEST_DB_URL="file:/app/database/test.db"
 
 echo "========================================="

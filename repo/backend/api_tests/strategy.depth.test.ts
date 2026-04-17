@@ -87,6 +87,30 @@ describe('Strategy depth — role authorization and DB-backed happy paths', () =
     expect(createRuleset.statusCode).toBe(201);
     const rulesetId = JSON.parse(createRuleset.payload).data.id as string;
 
+    const getRuleset = await app.inject({
+      method: 'GET',
+      url: `/api/strategy/rulesets/${rulesetId}`,
+      headers: authHeader(strategyManager.token),
+    });
+    expect(getRuleset.statusCode).toBe(200);
+    const getRulesetBody = JSON.parse(getRuleset.payload);
+    expect(getRulesetBody.data.id).toBe(rulesetId);
+    expect(getRulesetBody.data.abcWeight).toBe(2);
+
+    const patchRuleset = await app.inject({
+      method: 'PATCH',
+      url: `/api/strategy/rulesets/${rulesetId}`,
+      headers: authHeader(strategyManager.token),
+      payload: {
+        name: 'Depth Ruleset Updated',
+        pathCostWeight: 3,
+      },
+    });
+    expect(patchRuleset.statusCode).toBe(200);
+    const patchRulesetBody = JSON.parse(patchRuleset.payload);
+    expect(patchRulesetBody.data.name).toBe('Depth Ruleset Updated');
+    expect(patchRulesetBody.data.pathCostWeight).toBe(3);
+
     const putawayRank = await app.inject({
       method: 'POST',
       url: '/api/strategy/putaway-rank',
@@ -104,6 +128,68 @@ describe('Strategy depth — role authorization and DB-backed happy paths', () =
     expect(rankBody.success).toBe(true);
     expect(Array.isArray(rankBody.data.ranked)).toBe(true);
     expect(rankBody.data.ranked.length).toBeGreaterThan(0);
+  });
+
+  it('plans pick path for generated wave tasks and returns ranked sequence', async () => {
+    const planner = await seedUserWithSession(app, ['STRATEGY_MANAGER', 'WAREHOUSE_OPERATOR']);
+    const { facility, sku } = await seedFacilityLocationAndSku();
+
+    const createRuleset = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/rulesets',
+      headers: authHeader(planner.token),
+      payload: {
+        name: `Path Ruleset ${randomUUID().slice(0, 8)}`,
+      },
+    });
+    expect(createRuleset.statusCode).toBe(201);
+    const rulesetId = JSON.parse(createRuleset.payload).data.id as string;
+
+    const createOrder = await app.inject({
+      method: 'POST',
+      url: '/api/outbound/orders',
+      headers: authHeader(planner.token),
+      payload: {
+        facilityId: facility.id,
+        type: 'SALES',
+        lines: [{ skuId: sku.id, quantity: 2 }],
+      },
+    });
+    expect(createOrder.statusCode).toBe(201);
+    const orderId = JSON.parse(createOrder.payload).data.id as string;
+
+    const createWave = await app.inject({
+      method: 'POST',
+      url: '/api/outbound/waves',
+      headers: {
+        ...authHeader(planner.token),
+        'idempotency-key': randomUUID(),
+      },
+      payload: {
+        facilityId: facility.id,
+        orderIds: [orderId],
+      },
+    });
+    expect(createWave.statusCode).toBe(201);
+    const pickTaskIds = (JSON.parse(createWave.payload).data.pickTasks as Array<{ id: string }>).map((t) => t.id);
+    expect(pickTaskIds.length).toBeGreaterThan(0);
+
+    const pickPath = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/pick-path',
+      headers: authHeader(planner.token),
+      payload: {
+        facilityId: facility.id,
+        pickTaskIds,
+        rulesetId,
+      },
+    });
+    expect(pickPath.statusCode).toBe(200);
+    const pickPathBody = JSON.parse(pickPath.payload);
+    expect(Array.isArray(pickPathBody.data.tasks)).toBe(true);
+    expect(pickPathBody.data.tasks.length).toBe(pickTaskIds.length);
+    expect(pickPathBody.data.tasks[0].suggestedSequence).toBe(1);
+    expect(typeof pickPathBody.data.tasks[0].score).toBe('number');
   });
 
   it('runs simulation successfully and returns deterministic envelope fields', async () => {

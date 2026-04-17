@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFile, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { TEST_CONFIG, seedUserWithSession, authHeader } from './_helpers.js';
@@ -38,7 +38,20 @@ describe('Admin depth — backup/restore and IP allowlist enforcement', () => {
       remoteAddress: '127.0.0.1',
     });
     expect(createBackup.statusCode).toBe(201);
-    const snapshotId = JSON.parse(createBackup.payload).data.id as string;
+    const createBackupBody = JSON.parse(createBackup.payload);
+    const snapshotId = createBackupBody.data.id as string;
+
+    const getSnapshot = await app.inject({
+      method: 'GET',
+      url: `/api/admin/backup/${snapshotId}`,
+      headers: authHeader(admin.token),
+      remoteAddress: '127.0.0.1',
+    });
+    expect(getSnapshot.statusCode).toBe(200);
+    const getSnapshotBody = JSON.parse(getSnapshot.payload);
+    expect(getSnapshotBody.data.id).toBe(snapshotId);
+    expect(getSnapshotBody.data.filename).toContain('.db.enc');
+    expect(getSnapshotBody.data.sizeBytes).toBeGreaterThan(0);
 
     const restore = await app.inject({
       method: 'POST',
@@ -134,25 +147,184 @@ describe('Admin depth — backup/restore and IP allowlist enforcement', () => {
     expect(body.data.length).toBeGreaterThan(0);
   });
 
-  it('fails closed with 500 when allowlist lookup errors', async () => {
+  it('supports parameter key get/update/delete lifecycle', async () => {
     const admin = await seedUserWithSession(app, ['SYSTEM_ADMIN']);
 
-    const findManySpy = vi
-      .spyOn(app.prisma.ipAllowlistEntry, 'findMany')
-      .mockRejectedValueOnce(new Error('allowlist lookup failure'));
+    const key = `depth.lifecycle.${randomUUID().slice(0, 8)}`;
+
+    const createParam = await app.inject({
+      method: 'POST',
+      url: '/api/admin/parameters',
+      headers: authHeader(admin.token),
+      payload: { key, value: 'v1', description: 'created in depth test' },
+      remoteAddress: '127.0.0.1',
+    });
+    expect(createParam.statusCode).toBe(201);
+
+    const getParam = await app.inject({
+      method: 'GET',
+      url: `/api/admin/parameters/${key}`,
+      headers: authHeader(admin.token),
+      remoteAddress: '127.0.0.1',
+    });
+    expect(getParam.statusCode).toBe(200);
+    expect(JSON.parse(getParam.payload).data.value).toBe('v1');
+
+    const updateParam = await app.inject({
+      method: 'PUT',
+      url: `/api/admin/parameters/${key}`,
+      headers: authHeader(admin.token),
+      payload: { value: 'v2', description: 'updated in depth test' },
+      remoteAddress: '127.0.0.1',
+    });
+    expect(updateParam.statusCode).toBe(200);
+    expect(JSON.parse(updateParam.payload).data.value).toBe('v2');
+
+    const deleteParam = await app.inject({
+      method: 'DELETE',
+      url: `/api/admin/parameters/${key}`,
+      headers: authHeader(admin.token),
+      remoteAddress: '127.0.0.1',
+    });
+    expect(deleteParam.statusCode).toBe(204);
+
+    const getDeleted = await app.inject({
+      method: 'GET',
+      url: `/api/admin/parameters/${key}`,
+      headers: authHeader(admin.token),
+      remoteAddress: '127.0.0.1',
+    });
+    expect(getDeleted.statusCode).toBe(404);
+    expect(JSON.parse(getDeleted.payload).error.code).toBe('NOT_FOUND');
+  });
+
+  it('supports ip allowlist patch and delete by entry id', async () => {
+    const admin = await seedUserWithSession(app, ['SYSTEM_ADMIN']);
+
+    const createEntry = await app.inject({
+      method: 'POST',
+      url: '/api/admin/ip-allowlist',
+      headers: authHeader(admin.token),
+      payload: {
+        cidr: '198.51.100.7/32',
+        routeGroup: 'admin',
+        description: 'depth-entry-initial',
+      },
+      remoteAddress: '127.0.0.1',
+    });
+    expect(createEntry.statusCode).toBe(201);
+    const entryId = JSON.parse(createEntry.payload).data.id as string;
+
+    const patchEntry = await app.inject({
+      method: 'PATCH',
+      url: `/api/admin/ip-allowlist/${entryId}`,
+      headers: authHeader(admin.token),
+      payload: { cidr: '198.51.100.8/32', isActive: false, description: 'depth-entry-updated' },
+      remoteAddress: '127.0.0.1',
+    });
+    expect(patchEntry.statusCode).toBe(200);
+    const patchBody = JSON.parse(patchEntry.payload);
+    expect(patchBody.data.id).toBe(entryId);
+    expect(patchBody.data.cidr).toBe('198.51.100.8/32');
+    expect(patchBody.data.isActive).toBe(false);
+
+    const listEntries = await app.inject({
+      method: 'GET',
+      url: '/api/admin/ip-allowlist?routeGroup=admin',
+      headers: authHeader(admin.token),
+      remoteAddress: '127.0.0.1',
+    });
+    expect(listEntries.statusCode).toBe(200);
+    const listed = JSON.parse(listEntries.payload).data as Array<{ id: string }>;
+    expect(listed.some((e) => e.id === entryId)).toBe(true);
+
+    const deleteEntry = await app.inject({
+      method: 'DELETE',
+      url: `/api/admin/ip-allowlist/${entryId}`,
+      headers: authHeader(admin.token),
+      remoteAddress: '127.0.0.1',
+    });
+    expect(deleteEntry.statusCode).toBe(204);
+
+    const listAfterDelete = await app.inject({
+      method: 'GET',
+      url: '/api/admin/ip-allowlist?routeGroup=admin',
+      headers: authHeader(admin.token),
+      remoteAddress: '127.0.0.1',
+    });
+    expect(listAfterDelete.statusCode).toBe(200);
+    const listedAfterDelete = JSON.parse(listAfterDelete.payload).data as Array<{ id: string }>;
+    expect(listedAfterDelete.some((e) => e.id === entryId)).toBe(false);
+  });
+
+  it('returns structured retention report and purge result payloads', async () => {
+    const admin = await seedUserWithSession(app, ['SYSTEM_ADMIN']);
+
+    const report = await app.inject({
+      method: 'GET',
+      url: '/api/admin/retention/report',
+      headers: authHeader(admin.token),
+      remoteAddress: '127.0.0.1',
+    });
+    expect(report.statusCode).toBe(200);
+    const reportBody = JSON.parse(report.payload);
+    expect(typeof reportBody.data.reportedAt).toBe('string');
+    expect(typeof reportBody.data.billing.eligibleForPurge).toBe('number');
+    expect(typeof reportBody.data.billing.retentionYears).toBe('number');
+    expect(typeof reportBody.data.operational.auditEventsEligible).toBe('number');
+    expect(typeof reportBody.data.operational.operationHistoryEligible).toBe('number');
+
+    const purgeBilling = await app.inject({
+      method: 'POST',
+      url: '/api/admin/retention/purge-billing',
+      headers: authHeader(admin.token),
+      payload: { confirm: true },
+      remoteAddress: '127.0.0.1',
+    });
+    expect(purgeBilling.statusCode).toBe(200);
+    const purgeBillingBody = JSON.parse(purgeBilling.payload);
+    expect(purgeBillingBody.data.domain).toBe('billing');
+    expect(typeof purgeBillingBody.data.purgedCount).toBe('number');
+    expect(typeof purgeBillingBody.data.purgedAt).toBe('string');
+
+    const purgeOperational = await app.inject({
+      method: 'POST',
+      url: '/api/admin/retention/purge-operational',
+      headers: authHeader(admin.token),
+      payload: { confirm: true },
+      remoteAddress: '127.0.0.1',
+    });
+    expect(purgeOperational.statusCode).toBe(200);
+    const purgeOperationalBody = JSON.parse(purgeOperational.payload);
+    expect(purgeOperationalBody.data.domain).toBe('operational');
+    expect(typeof purgeOperationalBody.data.auditEventsPurged).toBe('number');
+    expect(typeof purgeOperationalBody.data.operationHistoryPurged).toBe('number');
+    expect(typeof purgeOperationalBody.data.cutoffDate).toBe('string');
+  });
+
+  it('denies admin routes in strict allowlist mode when no active entries exist', async () => {
+    const strictApp = await buildApp({
+      config: {
+        ...TEST_CONFIG,
+        backupDir,
+        ipAllowlistStrictMode: true,
+      },
+    });
 
     try {
-      const response = await app.inject({
+      const admin = await seedUserWithSession(strictApp, ['SYSTEM_ADMIN']);
+
+      const response = await strictApp.inject({
         method: 'GET',
         url: '/api/admin/diagnostics',
         headers: authHeader(admin.token),
         remoteAddress: '127.0.0.1',
       });
 
-      expect(response.statusCode).toBe(500);
-      expect(JSON.parse(response.payload).error.code).toBe('INTERNAL_ERROR');
+      expect(response.statusCode).toBe(403);
+      expect(JSON.parse(response.payload).error.code).toBe('IP_BLOCKED');
     } finally {
-      findManySpy.mockRestore();
+      await strictApp.close();
     }
   });
 });
