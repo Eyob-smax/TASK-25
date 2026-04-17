@@ -1,0 +1,687 @@
+// ============================================================
+// GreenCycle Warehouse & Content Operations API — Prisma Schema
+// Datasource: SQLite (single-node offline operation)
+//
+// SQLite constraints:
+//   - No native enum support → String fields with app-layer validation
+//   - No native JSON type → String for JSON-serialized fields
+//   - DateTime stored as ISO 8601 strings
+//
+// Enum value sets are defined in src/shared/enums.ts
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================
+// AUTH & INFRASTRUCTURE
+// ============================
+
+/// User account for local username/password authentication.
+model User {
+  id                   String    @id @default(cuid())
+  username             String    @unique
+  passwordHash         String    // scrypt hash wrapped in AES-256-GCM envelope at rest (format: version:nonce:tag:ciphertext); unwrap via security/password.ts
+  passwordVersion      Int       @default(1) // incremented on rotation
+  encryptionKeyVersion String?   // key version used for sensitive field encryption
+  isActive             Boolean   @default(true)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  deletedAt            DateTime?
+
+  roles                UserRole[]
+  sessions             Session[]
+  articles             Article[]       @relation("ArticleAuthor")
+  reviewedArticles     Article[]       @relation("ArticleReviewer")
+  createdPayments      PaymentRecord[] @relation("PaymentCreator")
+}
+
+/// Role assignment for a user. A user can hold multiple roles.
+/// Roles: SYSTEM_ADMIN, WAREHOUSE_MANAGER, WAREHOUSE_OPERATOR,
+///        STRATEGY_MANAGER, MEMBERSHIP_MANAGER, CMS_REVIEWER, BILLING_MANAGER
+model UserRole {
+  id         String   @id @default(cuid())
+  userId     String
+  role       String   // validated against Role enum in app layer
+  assignedAt DateTime @default(now())
+  assignedBy String   // userId of assigner or SYSTEM
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, role])
+  @@index([userId])
+}
+
+/// Opaque server-managed session.
+model Session {
+  id              String    @id @default(cuid())
+  token           String    @unique
+  userId          String
+  passwordVersion Int       // must match User.passwordVersion; invalidated on rotation
+  ipAddress       String?
+  expiresAt       DateTime
+  createdAt       DateTime  @default(now())
+  revokedAt       DateTime?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// IP allowlist entry for privileged route groups.
+model IpAllowlistEntry {
+  id          String   @id @default(cuid())
+  cidr        String   // CIDR notation, e.g. "192.168.1.0/24"
+  routeGroup  String   // route group this applies to, e.g. "admin", "backup"
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+/// Per-principal rate limiting bucket (sliding window).
+model RateLimitBucket {
+  id           String   @id @default(cuid())
+  principalId  String   // userId
+  windowStart  DateTime
+  requestCount Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  @@index([principalId, windowStart])
+}
+
+/// Encryption key version metadata for field-level encryption.
+/// Keys are locally managed with 180-day rotation cycles.
+model EncryptionKeyVersion {
+  id          String    @id @default(cuid())
+  version     Int       @unique
+  status      String    @default("ACTIVE") // ACTIVE, ROTATED, REVOKED
+  algorithm   String    @default("aes-256-gcm")
+  keyHash     String?   // hash of the key for verification (never the key itself)
+  createdAt   DateTime  @default(now())
+  rotatedAt   DateTime?
+  expiresAt   DateTime? // createdAt + 180 days
+}
+
+/// Append-only audit event. No updatedAt, no deletedAt — immutable.
+model AuditEvent {
+  id            String   @id @default(cuid())
+  actor         String   // userId or "SYSTEM"
+  action        String   // CREATE, UPDATE, DELETE, TRANSITION
+  resourceType  String   // e.g. "Appointment", "Article", "PaymentRecord"
+  resourceId    String
+  beforeDigest  String?  // SHA-256 of serialized state before
+  afterDigest   String?  // SHA-256 of serialized state after
+  metadata      String?  // JSON-serialized additional context
+  timestamp     DateTime @default(now())
+
+  @@index([resourceType, resourceId])
+  @@index([actor])
+  @@index([timestamp])
+}
+
+/// Configuration parameter / dictionary entry.
+model ParameterDictionaryEntry {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       String
+  description String?
+  updatedBy   String   // userId
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+/// Backup snapshot metadata for encrypted file snapshots.
+model BackupSnapshot {
+  id                   String    @id @default(cuid())
+  filename             String
+  path                 String
+  sizeBytes            Int
+  encryptionKeyVersion Int
+  checksum             String    // SHA-256 of the encrypted file
+  status               String    @default("COMPLETED") // COMPLETED, FAILED, RESTORING, RESTORED
+  createdBy            String    // userId
+  createdAt            DateTime  @default(now())
+  restoredAt           DateTime?
+  restoredBy           String?
+}
+
+/// Idempotency key registry for deduplication.
+model IdempotencyRecord {
+  id           String   @id @default(cuid())
+  key          String   @unique
+  requestHash  String   // hash of request params for conflict detection
+  responseBody String?  // cached response for replay
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
+// ============================
+// WAREHOUSE
+// ============================
+
+/// Physical warehouse facility.
+model Facility {
+  id        String    @id @default(cuid())
+  name      String
+  code      String    @unique
+  address   String?
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  zones        Zone[]
+  locations    Location[]
+  appointments Appointment[]
+  waves        Wave[]
+  orders       OutboundOrder[]
+}
+
+/// Logical zone within a facility.
+model Zone {
+  id          String    @id @default(cuid())
+  facilityId  String
+  name        String
+  code        String
+  description String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  facility  Facility   @relation(fields: [facilityId], references: [id])
+  locations Location[]
+
+  @@unique([facilityId, code])
+  @@index([facilityId])
+}
+
+/// Storage location with physical attributes.
+model Location {
+  id              String    @id @default(cuid())
+  facilityId      String
+  zoneId          String?
+  code            String    @unique // unique across entire system
+  type            String    @default("RACK") // RACK, FLOOR, BULK, PICK_FACE, STAGING, RECEIVING, SHIPPING
+  capacityCuFt    Float     // capacity in cubic feet; must be > 0
+  hazardClass     String    @default("NONE") // NONE, FLAMMABLE, CORROSIVE, TOXIC, OXIDIZER, COMPRESSED_GAS
+  temperatureBand String    @default("AMBIENT") // AMBIENT, COOL, COLD, FROZEN
+  isPickFace      Boolean   @default(false)
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  facility      Facility       @relation(fields: [facilityId], references: [id])
+  zone          Zone?          @relation(fields: [zoneId], references: [id])
+  inventoryLots InventoryLot[]
+  pickTasks     PickTask[]
+
+  @@index([facilityId, code])
+}
+
+/// Stock keeping unit / item master data.
+model Sku {
+  id              String    @id @default(cuid())
+  code            String    @unique
+  name            String
+  description     String?
+  abcClass        String    @default("C") // A, B, C
+  unitWeightLb    Float     // unit weight in pounds
+  unitVolumeCuFt  Float     // unit volume in cubic feet
+  hazardClass     String    @default("NONE")
+  temperatureBand String    @default("AMBIENT")
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  inventoryLots     InventoryLot[]
+  outboundOrderLines OutboundOrderLine[]
+  pickTasks         PickTask[]
+}
+
+/// Inventory lot tracking on-hand, reserved, and damaged quantities.
+model InventoryLot {
+  id             String    @id @default(cuid())
+  skuId          String
+  locationId     String
+  lotNumber      String
+  batchNumber    String?
+  expirationDate DateTime?
+  onHand         Int       @default(0) // must be >= 0
+  reserved       Int       @default(0) // must be >= 0
+  damaged        Int       @default(0) // must be >= 0
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  sku      Sku      @relation(fields: [skuId], references: [id])
+  location Location @relation(fields: [locationId], references: [id])
+
+  @@index([skuId, lotNumber, expirationDate])
+  @@index([locationId])
+}
+
+/// Inbound/outbound appointment with strict state machine.
+/// States: PENDING, CONFIRMED, RESCHEDULED, CANCELLED, EXPIRED
+model Appointment {
+  id              String    @id @default(cuid())
+  facilityId      String
+  type            String    // INBOUND, OUTBOUND
+  state           String    @default("PENDING")
+  scheduledAt     DateTime
+  confirmedAt     DateTime?
+  completedAt     DateTime?
+  cancelledAt     DateTime?
+  expiredAt       DateTime?
+  carrierId       String?
+  referenceNumber String?
+  notes           String?
+  createdBy       String    // userId
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  facility         Facility                      @relation(fields: [facilityId], references: [id])
+  operationHistory AppointmentOperationHistory[]
+
+  @@index([facilityId, state])
+  @@index([state, createdAt])
+}
+
+/// Immutable appointment operation history. No updatedAt, no deletedAt.
+/// Every state transition creates exactly one record.
+model AppointmentOperationHistory {
+  id            String   @id @default(cuid())
+  appointmentId String
+  actor         String   // userId or "SYSTEM" for auto-expire
+  priorState    String
+  newState      String
+  reason        String?
+  timestamp     DateTime @default(now())
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id])
+
+  @@index([appointmentId])
+}
+
+// ============================
+// OUTBOUND EXECUTION
+// ============================
+
+/// Outbound order (sales, return, or transfer).
+model OutboundOrder {
+  id                    String    @id @default(cuid())
+  facilityId            String
+  type                  String    // SALES, RETURN, TRANSFER
+  status                String    @default("DRAFT") // DRAFT, PICKING, PACKING, PACKED, SHIPPED, PARTIAL_SHIPPED, CANCELLED
+  referenceNumber       String?
+  requestedShipDate     DateTime?
+  approvedForPartialShip Boolean  @default(false)
+  approvedBy            String?   // userId who approved partial shipment
+  approvedAt            DateTime?
+  createdBy             String    // userId
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  deletedAt             DateTime?
+
+  facility          Facility            @relation(fields: [facilityId], references: [id])
+  lines             OutboundOrderLine[]
+  packVerifications PackVerification[]
+  handoffRecords    HandoffRecord[]
+  pickTasks         PickTask[]
+}
+
+/// Line item on an outbound order. Backorder lines link to original via sourceLineId.
+model OutboundOrderLine {
+  id              String    @id @default(cuid())
+  orderId         String
+  skuId           String
+  quantity        Int       // requested quantity
+  quantityFulfilled Int     @default(0)
+  quantityShort   Int       @default(0)
+  lineType        String    @default("STANDARD") // STANDARD, BACKORDER
+  sourceLineId    String?   // for BACKORDER lines: references original line
+  shortageReason  String?   // STOCKOUT, DAMAGE, OVERSELL
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  order      OutboundOrder      @relation(fields: [orderId], references: [id])
+  sku        Sku                @relation(fields: [skuId], references: [id])
+  sourceLine OutboundOrderLine? @relation("BackorderLineage", fields: [sourceLineId], references: [id])
+  backorders OutboundOrderLine[] @relation("BackorderLineage")
+  pickTasks  PickTask[]
+
+  @@index([orderId])
+}
+
+/// Wave for grouping pick tasks with idempotency key deduplication.
+model Wave {
+  id             String    @id @default(cuid())
+  facilityId     String
+  idempotencyKey String    @unique // 24-hour deduplication window
+  status         String    @default("CREATED") // CREATED, IN_PROGRESS, COMPLETED, CANCELLED
+  createdBy      String    // userId
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  facility  Facility   @relation(fields: [facilityId], references: [id])
+  pickTasks PickTask[]
+
+  @@index([facilityId])
+}
+
+/// Individual pick task within a wave.
+model PickTask {
+  id                String    @id @default(cuid())
+  waveId            String
+  orderId           String
+  orderLineId       String
+  skuId             String
+  locationId        String
+  quantity          Int       // quantity to pick
+  quantityPicked    Int       @default(0)
+  status            String    @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED, SHORT, CANCELLED
+  sequence          Int       // optimized pick order within wave
+  startedAt         DateTime?
+  completedAt       DateTime?
+  assignedTo        String?   // userId
+  estimatedDistance  Float?    // estimated pick path distance
+  actualDistance     Float?    // actual pick path distance
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  wave      Wave              @relation(fields: [waveId], references: [id])
+  order     OutboundOrder     @relation(fields: [orderId], references: [id])
+  orderLine OutboundOrderLine @relation(fields: [orderLineId], references: [id])
+  sku       Sku               @relation(fields: [skuId], references: [id])
+  location  Location          @relation(fields: [locationId], references: [id])
+
+  @@index([waveId])
+  @@index([status, completedAt])
+}
+
+/// Pack-time verification capturing weight and volume with variance checks.
+model PackVerification {
+  id                 String   @id @default(cuid())
+  orderId            String
+  expectedWeightLb   Float
+  actualWeightLb     Float
+  expectedVolumeCuFt Float
+  actualVolumeCuFt   Float
+  weightVariancePct  Float
+  volumeVariancePct  Float
+  status             String   // PASSED, FAILED_WEIGHT, FAILED_VOLUME, FAILED_BOTH
+  verifiedBy         String   // userId
+  verifiedAt         DateTime @default(now())
+  rejectionReason    String?
+  createdAt          DateTime @default(now())
+
+  order OutboundOrder @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+}
+
+/// Outbound handoff recording to carrier.
+model HandoffRecord {
+  id             String   @id @default(cuid())
+  orderId        String
+  carrier        String
+  trackingNumber String?
+  handoffBy      String   // userId
+  handoffAt      DateTime @default(now())
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  order OutboundOrder @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+}
+
+// ============================
+// STRATEGY CENTER
+// ============================
+
+/// Strategy ruleset configuration for putaway/pick-path optimization.
+model StrategyRuleset {
+  id              String   @id @default(cuid())
+  name            String
+  description     String?
+  // Rule configuration (JSON-serialized for SQLite)
+  fifoWeight      Float    @default(1.0)
+  fefoWeight      Float    @default(0.0) // FIFO vs FEFO: one should dominate
+  abcWeight       Float    @default(1.0) // ABC velocity weighting
+  heatLevelWeight Float    @default(1.0)
+  pathCostWeight  Float    @default(1.0)
+  isActive        Boolean  @default(true)
+  createdBy       String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ============================
+// MEMBERSHIP & BILLING
+// ============================
+
+/// Member record. Sensitive fields (memberNumber, email, phone) encrypted at rest.
+/// memberNumberHash is an HMAC-SHA-256 of the plaintext memberNumber keyed by the
+/// master key, stored alongside the ciphertext to enable O(1) uniqueness lookup
+/// without linearly decrypting every row. Nullable for backward compatibility
+/// with records created before this field existed.
+model Member {
+  id                   String    @id @default(cuid())
+  memberNumber         String    @unique // encrypted at rest
+  memberNumberHash     String?   @unique // HMAC-SHA-256 of plaintext for uniqueness lookups
+  firstName            String
+  lastName             String
+  email                String?   // encrypted at rest
+  phone                String?   // encrypted at rest
+  encryptionKeyVersion String?   // key version used for encryption
+  isActive             Boolean   @default(true)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  deletedAt            DateTime?
+
+  enrollments MemberPackageEnrollment[]
+  payments    PaymentRecord[]
+}
+
+/// Membership package definition.
+/// Types: PUNCH, TERM, STORED_VALUE, BUNDLE
+model MembershipPackage {
+  id           String    @id @default(cuid())
+  name         String
+  type         String    // PUNCH, TERM, STORED_VALUE, BUNDLE
+  description  String?
+  price        Float
+  durationDays Int?      // for TERM packages
+  punchCount   Int?      // for PUNCH packages
+  storedValue  Float?    // for STORED_VALUE packages
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  enrollments MemberPackageEnrollment[]
+}
+
+/// Member enrollment in a package.
+model MemberPackageEnrollment {
+  id             String    @id @default(cuid())
+  memberId       String
+  packageId      String
+  status         String    @default("ACTIVE") // ACTIVE, SUSPENDED, EXPIRED, CANCELLED
+  startDate      DateTime
+  endDate        DateTime?
+  punchesUsed    Int       @default(0)
+  remainingValue Float?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  member   Member            @relation(fields: [memberId], references: [id])
+  package  MembershipPackage @relation(fields: [packageId], references: [id])
+  payments PaymentRecord[]
+
+  @@index([memberId, status])
+}
+
+/// Payment record with billing retention (7 years).
+/// Sensitive: last4Encrypted, invoiceNumber.
+model PaymentRecord {
+  id                   String    @id @default(cuid())
+  memberId             String
+  enrollmentId         String?
+  invoiceNumber        String    @unique // format: GC-YYYYMMDD-NNNNN
+  amount               Float
+  currency             String    @default("USD")
+  paymentMethod        String?
+  last4Encrypted       String?   // encrypted payment card last 4
+  encryptionKeyVersion String?   // key version for last4
+  status               String    @default("RECORDED") // RECORDED, SETTLED, VOIDED, REFUNDED
+  paidAt               DateTime?
+  createdBy            String    // userId
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  deletedAt            DateTime?
+  retentionExpiresAt   DateTime? // deletedAt + 7 years; purge-eligible after this
+
+  member     Member                   @relation(fields: [memberId], references: [id])
+  enrollment MemberPackageEnrollment? @relation(fields: [enrollmentId], references: [id])
+  creator    User                     @relation("PaymentCreator", fields: [createdBy], references: [id])
+
+  @@index([memberId])
+  @@index([status])
+}
+
+// ============================
+// CMS
+// ============================
+
+/// Content category with multi-level hierarchy (adjacency list).
+model Category {
+  id        String    @id @default(cuid())
+  name      String
+  slug      String    @unique
+  parentId  String?
+  depth     Int       @default(0) // 0 = root
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryHierarchy")
+
+  articleCategories ArticleCategory[]
+}
+
+/// Tag with normalization, tombstone support for merges, and canonical redirect.
+model Tag {
+  id              String    @id @default(cuid())
+  name            String
+  normalizedName  String    @unique // lowercase, trimmed, collapsed whitespace
+  isTombstone     Boolean   @default(false) // true if merged into another tag
+  canonicalTagId  String?   // if tombstone, redirects to this tag
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  canonicalTag Tag?  @relation("TagMerge", fields: [canonicalTagId], references: [id])
+  mergedFrom   Tag[] @relation("TagMerge")
+
+  aliases     TagAlias[]
+  articleTags ArticleTag[]
+}
+
+/// Tag alias for alternative names.
+model TagAlias {
+  id              String   @id @default(cuid())
+  tagId           String
+  alias           String
+  normalizedAlias String
+  createdAt       DateTime @default(now())
+
+  tag Tag @relation(fields: [tagId], references: [id])
+
+  @@index([tagId])
+  @@index([normalizedAlias])
+}
+
+/// Article with CMS state machine.
+/// States: DRAFT, IN_REVIEW, APPROVED, PUBLISHED, SCHEDULED, WITHDRAWN
+model Article {
+  id                 String    @id @default(cuid())
+  title              String
+  slug               String    @unique
+  body               String
+  state              String    @default("DRAFT")
+  authorId           String
+  reviewerId         String?
+  publishedAt        DateTime?
+  scheduledPublishAt DateTime?
+  withdrawnAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
+  author       User              @relation("ArticleAuthor", fields: [authorId], references: [id])
+  reviewer     User?             @relation("ArticleReviewer", fields: [reviewerId], references: [id])
+  tags         ArticleTag[]
+  categories   ArticleCategory[]
+  interactions ArticleInteraction[]
+
+  @@index([state, publishedAt])
+  @@index([authorId])
+}
+
+/// Join table: Article ↔ Tag
+model ArticleTag {
+  id        String   @id @default(cuid())
+  articleId String
+  tagId     String
+  createdAt DateTime @default(now())
+
+  article Article @relation(fields: [articleId], references: [id])
+  tag     Tag     @relation(fields: [tagId], references: [id])
+
+  @@unique([articleId, tagId])
+}
+
+/// Join table: Article ↔ Category
+model ArticleCategory {
+  id         String   @id @default(cuid())
+  articleId  String
+  categoryId String
+  createdAt  DateTime @default(now())
+
+  article  Article  @relation(fields: [articleId], references: [id])
+  category Category @relation(fields: [categoryId], references: [id])
+
+  @@unique([articleId, categoryId])
+}
+
+/// Article interaction event for trending-tag calculations.
+/// Interactions from the last 7 days are used for trending stats.
+model ArticleInteraction {
+  id        String   @id @default(cuid())
+  articleId String
+  userId    String?
+  sessionId String?
+  type      String   // VIEW, SHARE, BOOKMARK, COMMENT
+  createdAt DateTime @default(now())
+
+  article Article @relation(fields: [articleId], references: [id])
+
+  @@index([articleId])
+  @@index([createdAt])
+  @@index([type, createdAt])
+}

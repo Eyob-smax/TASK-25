@@ -1,0 +1,36 @@
+{
+  "name": "greencycle-api",
+  "version": "0.1.0",
+  "description": "GreenCycle Warehouse & Content Operations API — offline environmental supply warehouse with local publishing and membership",
+  "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:api": "vitest run --config vitest.api.config.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy",
+    "seed:admin": "tsx src/scripts/bootstrap-admin.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.5.0",
+    "fastify": "^5.3.0",
+    "fastify-plugin": "^4.5.1",
+    "pino": "^9.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "@types/supertest": "^6.0.2",
+    "pino-pretty": "^13.0.0",
+    "prisma": "^6.5.0",
+    "supertest": "^7.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0"
+  }
+}

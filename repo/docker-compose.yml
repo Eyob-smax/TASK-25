@@ -1,0 +1,48 @@
+# GreenCycle Warehouse & Content Operations API
+# Single-service offline Docker topology — no external dependencies
+#
+# Usage:
+#   docker compose up --build
+#   docker compose down
+#
+# Required at runtime (no default — must be supplied):
+#   ENCRYPTION_MASTER_KEY — 64 hex chars (32-byte AES master key)
+#                           Generate: openssl rand -hex 32
+#                           Set via shell export or .env file (never commit)
+
+services:
+  backend:
+    build:
+      context: ./backend
+      target: runtime
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      DATABASE_URL: "file:/app/database/greencycle.db"
+      BACKUP_DIR: "/app/backups"
+      LOG_LEVEL: "info"
+      # Security — override defaults if needed
+      SESSION_TIMEOUT_HOURS: "8"
+      LOGIN_MAX_ATTEMPTS: "5"
+      LOGIN_WINDOW_MINUTES: "15"
+      # Required in production: set via environment or .env file
+      ENCRYPTION_MASTER_KEY: "${ENCRYPTION_MASTER_KEY:-}"
+    volumes:
+      - greencycle-data:/app/database
+      - greencycle-backups:/app/backups
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  greencycle-data:
+    driver: local
+  greencycle-backups:
+    driver: local
