@@ -12,10 +12,14 @@ vi.mock('../../src/security/ipallowlist.js', () => ({
 }));
 
 import securityPlugin from '../../src/plugins/security.plugin.js';
-import { getIpAllowlistForGroup } from '../../src/repositories/auth.repository.js';
+import {
+  getIpAllowlistForGroup,
+  getLatestRateLimitBucket,
+} from '../../src/repositories/auth.repository.js';
 import { isIpAllowed } from '../../src/security/ipallowlist.js';
 
 const mockedGetIpAllowlistForGroup = vi.mocked(getIpAllowlistForGroup);
+const mockedGetLatestRateLimitBucket = vi.mocked(getLatestRateLimitBucket);
 const mockedIsIpAllowed = vi.mocked(isIpAllowed);
 
 describe('security.plugin', () => {
@@ -57,5 +61,45 @@ describe('security.plugin', () => {
 
     expect(reply.status).toHaveBeenCalledWith(403);
     expect(reply.send).toHaveBeenCalled();
+  });
+
+  it('rate-limit backend failures return 503 (fail-closed)', async () => {
+    const addHook = vi.fn();
+    const fastify = {
+      prisma: {},
+      config: { ipAllowlistStrictMode: true },
+      addHook,
+      decorate: vi.fn(),
+    } as unknown as Parameters<Exclude<typeof securityPlugin, undefined>>[0];
+
+    await (securityPlugin as any)(fastify, {});
+
+    mockedGetLatestRateLimitBucket.mockRejectedValue(new Error('db unavailable'));
+
+    const rateLimitHook = addHook.mock.calls.find((c) => c[0] === 'preHandler')?.[1] as Function;
+    expect(typeof rateLimitHook).toBe('function');
+
+    const reply = {
+      header: vi.fn().mockReturnThis(),
+      status: vi.fn().mockReturnThis(),
+      send: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await rateLimitHook(
+      {
+        principal: { userId: 'user-1' },
+        id: 'req-2',
+        log: { error: vi.fn(), warn: vi.fn() },
+      },
+      reply,
+    );
+
+    expect(reply.status).toHaveBeenCalledWith(503);
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        error: expect.objectContaining({ code: 'INTERNAL_ERROR' }),
+      }),
+    );
   });
 });

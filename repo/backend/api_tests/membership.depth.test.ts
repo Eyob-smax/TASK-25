@@ -90,6 +90,60 @@ describe('Membership depth — role authorization and masking behavior', () => {
     expect(JSON.parse(listAsOperator.payload).error.code).toBe('FORBIDDEN');
   });
 
+  it('forbids billing manager from member list/get endpoints', async () => {
+    const membershipManager = await seedUserWithSession(app, ['MEMBERSHIP_MANAGER']);
+    const billingManager = await seedUserWithSession(app, ['BILLING_MANAGER']);
+
+    const { memberId } = await createMember(membershipManager.token, 'ROLEBOUNDARY');
+
+    const listAsBilling = await app.inject({
+      method: 'GET',
+      url: '/api/membership/members',
+      headers: authHeader(billingManager.token),
+    });
+    expect(listAsBilling.statusCode).toBe(403);
+    expect(JSON.parse(listAsBilling.payload).error.code).toBe('FORBIDDEN');
+
+    const getAsBilling = await app.inject({
+      method: 'GET',
+      url: `/api/membership/members/${memberId}`,
+      headers: authHeader(billingManager.token),
+    });
+    expect(getAsBilling.statusCode).toBe(403);
+    expect(JSON.parse(getAsBilling.payload).error.code).toBe('FORBIDDEN');
+  });
+
+  it('enforces object-level member scope for non-admin membership managers', async () => {
+    const ownerManager = await seedUserWithSession(app, ['MEMBERSHIP_MANAGER']);
+    const otherManager = await seedUserWithSession(app, ['MEMBERSHIP_MANAGER']);
+
+    const { memberId } = await createMember(ownerManager.token, 'OWNERSCOPE');
+
+    const ownerGet = await app.inject({
+      method: 'GET',
+      url: `/api/membership/members/${memberId}`,
+      headers: authHeader(ownerManager.token),
+    });
+    expect(ownerGet.statusCode).toBe(200);
+
+    const otherGet = await app.inject({
+      method: 'GET',
+      url: `/api/membership/members/${memberId}`,
+      headers: authHeader(otherManager.token),
+    });
+    expect(otherGet.statusCode).toBe(404);
+    expect(JSON.parse(otherGet.payload).error.code).toBe('NOT_FOUND');
+
+    const otherList = await app.inject({
+      method: 'GET',
+      url: '/api/membership/members',
+      headers: authHeader(otherManager.token),
+    });
+    expect(otherList.statusCode).toBe(200);
+    const otherListBody = JSON.parse(otherList.payload);
+    expect(otherListBody.data.some((m: { id: string }) => m.id === memberId)).toBe(false);
+  });
+
   it('billing manager sees payment last4 while non-billing role receives masked null', async () => {
     const membershipManager = await seedUserWithSession(app, ['MEMBERSHIP_MANAGER']);
     const billingManager = await seedUserWithSession(app, ['BILLING_MANAGER']);
@@ -240,5 +294,86 @@ describe('Membership depth — role authorization and masking behavior', () => {
     expect(patchPackageBody.data.name).toBe('Depth Package Updated');
     expect(patchPackageBody.data.price).toBe(149.99);
     expect(patchPackageBody.data.isActive).toBe(false);
+  });
+
+  it('soft-deletes payment, anchors retentionExpiresAt at deletedAt+7y, and makes it purge-eligible', async () => {
+    const billingManager = await seedUserWithSession(app, ['BILLING_MANAGER']);
+    const systemAdmin = await seedUserWithSession(app, ['SYSTEM_ADMIN']);
+    const membershipManager = await seedUserWithSession(app, ['MEMBERSHIP_MANAGER']);
+
+    const createMemberResponse = await app.inject({
+      method: 'POST',
+      url: '/api/membership/members',
+      headers: authHeader(membershipManager.token),
+      payload: {
+        memberNumber: `RET-${randomUUID().slice(0, 8)}`,
+        firstName: 'Retention',
+        lastName: 'Member',
+      },
+    });
+    expect(createMemberResponse.statusCode).toBe(201);
+    const memberId = JSON.parse(createMemberResponse.payload).data.id as string;
+
+    const paymentResponse = await app.inject({
+      method: 'POST',
+      url: '/api/membership/payments',
+      headers: authHeader(billingManager.token),
+      payload: { memberId, amount: 19.99, currency: 'USD', paymentMethod: 'CARD', last4: '1111' },
+    });
+    expect(paymentResponse.statusCode).toBe(201);
+    const paymentId = JSON.parse(paymentResponse.payload).data.id as string;
+
+    const fresh = await app.prisma.paymentRecord.findFirst({ where: { id: paymentId } });
+    expect(fresh?.deletedAt).toBeNull();
+    expect(fresh?.retentionExpiresAt).toBeNull();
+
+    const softDelete = await app.inject({
+      method: 'DELETE',
+      url: `/api/membership/payments/${paymentId}`,
+      headers: authHeader(billingManager.token),
+    });
+    expect(softDelete.statusCode).toBe(200);
+    const softDeleteBody = JSON.parse(softDelete.payload);
+    expect(softDeleteBody.data.id).toBe(paymentId);
+    expect(typeof softDeleteBody.data.deletedAt).toBe('string');
+    expect(typeof softDeleteBody.data.retentionExpiresAt).toBe('string');
+
+    const afterDelete = await app.prisma.paymentRecord.findFirst({ where: { id: paymentId } });
+    expect(afterDelete?.deletedAt).not.toBeNull();
+    expect(afterDelete?.retentionExpiresAt).not.toBeNull();
+    // retentionExpiresAt should be ~7 years after deletedAt.
+    const expiryYears =
+      afterDelete!.retentionExpiresAt!.getFullYear() - afterDelete!.deletedAt!.getFullYear();
+    expect(expiryYears).toBe(7);
+
+    // Soft-deleted records disappear from reads.
+    const getAfter = await app.inject({
+      method: 'GET',
+      url: `/api/membership/payments/${paymentId}`,
+      headers: authHeader(billingManager.token),
+    });
+    expect(getAfter.statusCode).toBe(404);
+
+    // Simulate a past retentionExpiresAt and verify purge-billing collects it.
+    const pastExpiry = new Date();
+    pastExpiry.setDate(pastExpiry.getDate() - 1);
+    await app.prisma.paymentRecord.update({
+      where: { id: paymentId },
+      data: { retentionExpiresAt: pastExpiry },
+    });
+
+    const purge = await app.inject({
+      method: 'POST',
+      url: '/api/admin/retention/purge-billing',
+      headers: authHeader(systemAdmin.token),
+      payload: { confirm: true },
+      remoteAddress: '127.0.0.1',
+    });
+    expect(purge.statusCode).toBe(200);
+    const purgeBody = JSON.parse(purge.payload);
+    expect(purgeBody.data.purgedCount).toBeGreaterThanOrEqual(1);
+
+    const purged = await app.prisma.paymentRecord.findFirst({ where: { id: paymentId } });
+    expect(purged).toBeNull();
   });
 });

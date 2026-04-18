@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { FastifyInstance } from 'fastify';
+import { seedUserWithSession, authHeader } from './_helpers.js';
 
 // NOTE: Unauthenticated and schema-validation tests do NOT require a migrated DB.
 // Tests that create real members/packages/payments require a migrated test database
@@ -74,7 +75,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { firstName: 'Jane', lastName: 'Doe' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
     const body = JSON.parse(res.payload);
     expect(body.success).toBe(false);
   });
@@ -86,7 +87,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { memberNumber: 'M001', lastName: 'Doe' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/packages missing name → 400', async () => {
@@ -96,7 +97,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { type: 'PUNCH', price: 50 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/packages missing type → 400', async () => {
@@ -106,7 +107,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { name: 'Basic', price: 50 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/packages invalid type → 400', async () => {
@@ -116,7 +117,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { name: 'Basic', type: 'INVALID', price: 50 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/payments missing memberId → 400', async () => {
@@ -126,7 +127,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { amount: 50 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/payments missing amount → 400', async () => {
@@ -136,7 +137,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { memberId: 'some-id' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/payments amount=0 → 400 (exclusiveMinimum)', async () => {
@@ -146,7 +147,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { memberId: 'some-id', amount: 0 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('PATCH /api/membership/payments/:id/status missing status → 400', async () => {
@@ -156,7 +157,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: {},
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('PATCH /api/membership/payments/:id/status invalid status → 400', async () => {
@@ -166,7 +167,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { status: 'INVALID_STATUS' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/members/:id/enrollments missing packageId → 400', async () => {
@@ -176,7 +177,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { startDate: '2026-01-01T00:00:00Z' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/members/:id/enrollments missing startDate → 400', async () => {
@@ -186,7 +187,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { packageId: 'pkg-id' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/payments last4 invalid format → 400', async () => {
@@ -196,7 +197,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { memberId: 'some-id', amount: 50, last4: 'ABCD' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/payments amount negative → 400', async () => {
@@ -206,7 +207,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { memberId: 'some-id', amount: -10 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/members invalid email format → 400', async () => {
@@ -216,7 +217,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { memberNumber: 'M001', firstName: 'Jane', lastName: 'Doe', email: 'not-an-email' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/membership/packages price=0 → 400 (exclusiveMinimum)', async () => {
@@ -226,7 +227,7 @@ describe('Membership — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { name: 'Test', type: 'PUNCH', price: 0 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 });
 
@@ -249,3 +250,59 @@ describe('Membership — Error envelope shape', () => {
     expect(body.meta).toHaveProperty('timestamp');
   });
 });
+
+describe('Membership — Authenticated validation failures [DB-required]', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => { app = await buildApp({ config: TEST_CONFIG }); });
+  afterEach(async () => { await app.close(); });
+
+  it('POST /api/membership/members missing required fields → 400 VALIDATION_FAILED', async () => {
+    const manager = await seedUserWithSession(app, ['MEMBERSHIP_MANAGER']);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/membership/members',
+      headers: authHeader(manager.token),
+      payload: { firstName: 'Jane' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('POST /api/membership/packages missing type → 400 VALIDATION_FAILED', async () => {
+    const manager = await seedUserWithSession(app, ['MEMBERSHIP_MANAGER']);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/membership/packages',
+      headers: authHeader(manager.token),
+      payload: { name: 'Pkg Missing Type', price: 50 },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('POST /api/membership/payments amount=0 → 400 VALIDATION_FAILED', async () => {
+    const manager = await seedUserWithSession(app, ['MEMBERSHIP_MANAGER']);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/membership/payments',
+      headers: authHeader(manager.token),
+      payload: { memberId: 'member-1', amount: 0 },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+});
+

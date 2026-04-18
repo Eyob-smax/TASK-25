@@ -148,8 +148,9 @@ export const createAppointmentBodySchema = {
 
 export const appointmentTransitionBodySchema = {
   type: 'object',
+  required: ['reason'],
   properties: {
-    reason: { type: 'string', maxLength: 500 },
+    reason: { type: 'string', minLength: 1, maxLength: 500 },
     scheduledAt: { type: 'string', format: 'date-time' }, // for reschedule
   },
   additionalProperties: false,

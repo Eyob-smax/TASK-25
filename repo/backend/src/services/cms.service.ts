@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { ArticleState } from '../shared/enums.js';
 import { ErrorCode } from '../shared/envelope.js';
+import { TRENDING_DEFAULTS } from '../shared/types.js';
 import {
   isValidArticleTransition,
   normalizeTagName,
@@ -45,6 +46,38 @@ export class CmsServiceError extends Error {
   }
 }
 
+async function resolveCanonicalTagId(prisma: PrismaClient, tagId: string): Promise<string> {
+  let currentId = tagId;
+  const visited = new Set<string>();
+
+  while (true) {
+    if (visited.has(currentId)) {
+      throw new CmsServiceError(ErrorCode.CONFLICT, 'Tag canonical chain contains a cycle');
+    }
+    visited.add(currentId);
+
+    const tag = await findTagById(prisma, currentId);
+    if (!tag) {
+      throw new CmsServiceError(ErrorCode.NOT_FOUND, `Tag not found: ${currentId}`);
+    }
+    if (!tag.isTombstone) {
+      return tag.id;
+    }
+    if (!tag.canonicalTagId) {
+      throw new CmsServiceError(
+        ErrorCode.CONFLICT,
+        `Tombstone tag ${tag.id} has no canonical target; use an active tag id`,
+      );
+    }
+    currentId = tag.canonicalTagId;
+  }
+}
+
+async function resolveCanonicalTagIds(prisma: PrismaClient, tagIds: string[]): Promise<string[]> {
+  const resolved = await Promise.all(tagIds.map((tagId) => resolveCanonicalTagId(prisma, tagId)));
+  return Array.from(new Set(resolved));
+}
+
 // ---- Article ----
 
 export async function createArticle(
@@ -66,7 +99,8 @@ export async function createArticle(
     await replaceArticleCategories(prisma, article.id, data.categoryIds);
   }
   if (data.tagIds && data.tagIds.length > 0) {
-    await replaceArticleTags(prisma, article.id, data.tagIds);
+    const canonicalTagIds = await resolveCanonicalTagIds(prisma, data.tagIds);
+    await replaceArticleTags(prisma, article.id, canonicalTagIds);
   }
 
   await auditCreate(prisma, actorId, 'Article', article.id, { title: article.title, slug: article.slug, state: article.state });
@@ -140,7 +174,8 @@ export async function updateArticle(
     await replaceArticleCategories(prisma, articleId, data.categoryIds);
   }
   if (data.tagIds !== undefined) {
-    await replaceArticleTags(prisma, articleId, data.tagIds);
+    const canonicalTagIds = await resolveCanonicalTagIds(prisma, data.tagIds);
+    await replaceArticleTags(prisma, articleId, canonicalTagIds);
   }
 
   const updated = await findArticleById(prisma, articleId);
@@ -223,10 +258,9 @@ export async function recordInteraction(
 
 export async function getTrendingTags(
   prisma: PrismaClient,
-  windowDays: number,
   limit: number,
 ) {
-  const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+  const since = new Date(Date.now() - TRENDING_DEFAULTS.windowDays * 24 * 60 * 60 * 1000);
   return countInteractionsByTagInWindow(prisma, since, limit);
 }
 

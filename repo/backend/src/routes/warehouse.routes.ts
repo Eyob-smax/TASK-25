@@ -88,7 +88,7 @@ interface CreateAppointmentBody {
   facilityId: string; type: string; scheduledAt: string;
   carrierId?: string; referenceNumber?: string; notes?: string;
 }
-interface AppointmentTransitionBody { reason?: string; scheduledAt?: string }
+interface AppointmentTransitionBody { reason: string; scheduledAt?: string }
 interface ListFacilitiesQuery { includeInactive?: boolean }
 interface ListLocationsQuery { facilityId?: string; zoneId?: string; includeInactive?: boolean }
 interface ListSkusQuery { includeInactive?: boolean }

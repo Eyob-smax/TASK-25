@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { FastifyInstance } from 'fastify';
+import { seedUserWithSession, authHeader } from './_helpers.js';
 
 // NOTE: Tests below cover unauthenticated (→ 401) and schema-validation (→ 400) paths.
 // These do NOT require a migrated database.
@@ -132,7 +133,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { value: 'some-value' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
     const body = JSON.parse(res.payload);
     expect(body.success).toBe(false);
   });
@@ -144,7 +145,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { key: 'test.param' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/admin/parameters key with invalid characters → 400', async () => {
@@ -154,7 +155,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { key: 'test key with spaces!', value: 'v' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('PUT /api/admin/parameters/:key missing value → 400', async () => {
@@ -164,7 +165,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { description: 'desc only' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/admin/ip-allowlist missing cidr → 400', async () => {
@@ -174,7 +175,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { routeGroup: 'admin' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/admin/ip-allowlist missing routeGroup → 400', async () => {
@@ -184,7 +185,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { cidr: '10.0.0.0/8' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/admin/ip-allowlist invalid routeGroup → 400', async () => {
@@ -194,7 +195,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { cidr: '10.0.0.0/8', routeGroup: 'totally-invalid' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/admin/retention/purge-billing missing confirm → 400', async () => {
@@ -204,7 +205,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: {},
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/admin/retention/purge-billing confirm=false → 400 (must be true)', async () => {
@@ -214,7 +215,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { confirm: false },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/admin/retention/purge-operational missing confirm → 400', async () => {
@@ -224,7 +225,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: {},
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/admin/backup/:id/restore missing confirm → 400', async () => {
@@ -234,7 +235,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: {},
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/admin/backup/:id/restore confirm=false → 400 (must be true)', async () => {
@@ -244,7 +245,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: { confirm: false },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/admin/key-versions/rotate missing keyHash → 400', async () => {
@@ -254,7 +255,7 @@ describe('Admin — Validation failures', () => {
       headers: { authorization: 'Bearer fake-token' },
       payload: {},
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 });
 
@@ -277,14 +278,14 @@ describe('Admin — Error envelope shape', () => {
     expect(body.meta).toHaveProperty('timestamp');
   });
 
-  it('validation error 400 has correct envelope shape', async () => {
+  it('auth error 401 has correct envelope shape', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/admin/parameters',
       headers: { authorization: 'Bearer fake-token' },
       payload: {},
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
     const body = JSON.parse(res.payload);
     expect(body).toHaveProperty('success', false);
     expect(body).toHaveProperty('error');
@@ -293,3 +294,56 @@ describe('Admin — Error envelope shape', () => {
     expect(body.meta).toHaveProperty('requestId');
   });
 });
+
+describe('Admin — Authenticated validation failures [DB-required]', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => { app = await buildApp({ config: TEST_CONFIG }); });
+  afterEach(async () => { await app.close(); });
+
+  it('POST /api/admin/retention/purge-billing with confirm=false → 400', async () => {
+    const admin = await seedUserWithSession(app, ['SYSTEM_ADMIN']);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/admin/retention/purge-billing',
+      headers: authHeader(admin.token),
+      payload: { confirm: false },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('POST /api/admin/ip-allowlist with invalid routeGroup → 400', async () => {
+    const admin = await seedUserWithSession(app, ['SYSTEM_ADMIN']);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/admin/ip-allowlist',
+      headers: authHeader(admin.token),
+      payload: { cidr: '10.0.0.0/8', routeGroup: 'invalid-group' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('POST /api/admin/parameters missing value → 400', async () => {
+    const admin = await seedUserWithSession(app, ['SYSTEM_ADMIN']);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/admin/parameters',
+      headers: authHeader(admin.token),
+      payload: { key: 'validation.missing.value' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+});
+

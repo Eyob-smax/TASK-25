@@ -94,7 +94,7 @@ Migration SQL is applied by `prisma migrate deploy` — invoked automatically as
 
 ## Current State
 
-All seven prompt domains are fully implemented, tested, and compliant with CLAUDE.md requirements.
+All seven prompt domains are implemented and covered by static tests in this repository. Final compliance/acceptance depends on environment-specific execution and audit outcomes.
 
 Implemented:
 - Full Prisma schema with all models, unique/composite indexes, soft-delete/retention fields
@@ -106,28 +106,33 @@ Implemented:
 - Unit tests: enums, invariants, security modules, audit helpers, warehouse state machine, pack verification, idempotency, strategy scoring, CMS article states, tag normalization, invoice format, membership enums/rules, payment transitions, shortage handling, backup encryption round-trip, retention eligibility, parameter key validation, IP CIDR matching, session primitives, domain logging
 - API tests (17 files): baseline contract suites plus depth coverage for auth, warehouse, outbound, strategy, membership, CMS, admin, and validation-envelope normalization
 - **Security layer (Prompt 3):** password hashing, session tokens, AES-256-GCM encryption, RBAC, rate limiting, IP allowlists, audit trail, log safety
-- **Warehouse operations engine (Prompt 4):** facilities, zones, locations, SKUs, inventory lots, appointments with FSM, immutable history, auto-expiry scheduler
+- **Warehouse operations engine (Prompt 4):** facilities, zones, locations, SKUs, inventory lots, appointments with FSM, immutable history (transition reason required), auto-expiry scheduler
 - **Outbound execution engine (Prompt 5):**
   - OutboundOrder lifecycle: DRAFT → PICKING → PACKING → PACKED → SHIPPED/PARTIAL_SHIPPED
   - Wave generation with 24-hour idempotency key deduplication (idempotent replay from cache)
   - Pick task lifecycle: PENDING → IN_PROGRESS → COMPLETED/SHORT/CANCELLED
+  - Pick integrity guards: rejects `quantityPicked > task.quantity`; SHORT requires positive shortage
   - Wave auto-completion when all tasks reach terminal states
   - Pack verification: ±5% tolerance on weight AND volume; PASSED/FAILED_WEIGHT/FAILED_VOLUME/FAILED_BOTH
+  - Handoff gate: order must be PACKED and latest pack verification must be PASSED
   - Shortage exception → automatic BACKORDER line creation with sourceLineId FK
   - Manager approval gate (WAREHOUSE_MANAGER/SYSTEM_ADMIN) before partial shipment
+  - Object-level operator scope: non-manager reads are scoped to records they created
 - **Strategy Center (Prompt 5):**
   - StrategyRuleset with 5 configurable weights: FIFO, FEFO, ABC, heat level, path cost
   - Putaway ranking: hazard/temperature compatibility filters + weighted location scoring
   - Pick-path planning: lot-based FIFO/FEFO/ABC/path cost scoring → sequence assignment
-  - 30-day simulation: re-sequences historical COMPLETED tasks per ruleset; comparative metrics (distance, touches, constraint violations)
+  - Fixed 30-day simulation window (request contract enforces `windowDays=30`)
   - All scoring functions exported as pure functions for unit testability
 - **Membership & Billing Ledger (Prompt 6):**
-  - Members with AES-256-GCM encrypted memberNumber/email/phone; application-level uniqueness check (decrypt-scan)
+  - Members with AES-256-GCM encrypted memberNumber/email/phone; deterministic keyed hash enforces memberNumber uniqueness
   - Package types: PUNCH (punchCount), TERM (durationDays → auto endDate), STORED_VALUE (storedValue → remainingValue), BUNDLE
   - Enrollment with type-specific initialization
   - Invoice numbers: GC-YYYYMMDD-NNNNN via `generateInvoiceNumber`; collision loop for uniqueness
   - Payment status transitions: RECORDED → SETTLED/VOIDED, SETTLED → REFUNDED
-  - 7-year billing retention via `retentionExpiresAt`
+  - Payment soft-delete (`DELETE /api/membership/payments/:paymentId`) anchors `retentionExpiresAt = deletedAt + 7 years`
+  - 7-year billing retention via `retentionExpiresAt`; hard-delete purge only after that date
+  - Member read endpoints restricted to MEMBERSHIP_MANAGER/SYSTEM_ADMIN
   - Role-aware masking: last4 visible to BILLING_MANAGER/SYSTEM_ADMIN only
 - **CMS Publishing (Prompt 6):**
   - Article 6-state FSM: DRAFT → IN_REVIEW → APPROVED → PUBLISHED/SCHEDULED → WITHDRAWN → DRAFT
@@ -136,18 +141,18 @@ Implemented:
   - Categories with parent hierarchy (depth computed from parent)
   - Tags with normalized name uniqueness, alias management, merge tombstones (non-destructive)
   - Bulk tag migration (targeted or full article reassignment)
-  - Trending tags: interaction count aggregation within configurable window (default 7 days)
+  - Trending tags: interaction count aggregation over a fixed 7-day window
   - Tag cloud: published article count per non-tombstone tag
 - **Operational Compliance (Prompt 7):**
   - Encrypted backup: AES-256-GCM file-level encryption of SQLite database; `[keyVersion(4)][nonce(12)][tag(16)][ciphertext]` binary format
   - Path-safe restore: `validateSnapshotPath` via `path.basename()` + resolved-path prefix check; decrypts to staging path; operator applies after service stop
   - Backup checksum: SHA-256 of encrypted file verified before decryption on restore
-  - 7-year billing retention purge (`/retention/purge-billing`): hard-deletes soft-deleted PaymentRecords past `retentionExpiresAt`
-  - 2-year operational log retention purge (`/retention/purge-operational`): hard-deletes AuditEvent and AppointmentOperationHistory rows past cutoff
+  - 7-year billing retention purge (`/retention/purge-billing`): hard-deletes soft-deleted PaymentRecords whose `retentionExpiresAt` is in the past; requires explicit `confirm: true` (enforced by schema AND service)
+  - 2-year operational log retention purge (`/retention/purge-operational`): hard-deletes AuditEvent and AppointmentOperationHistory rows past cutoff; requires explicit `confirm: true`
   - Retention report (`/retention/report`): counts eligible records per domain without purging
   - Parameter dictionary CRUD (`/parameters`): SYSTEM_ADMIN-only read/write with admin IP allowlist enforcement; audited, key format validated
-  - IP allowlist CRUD (`/ip-allowlist`): manage CIDR entries per routeGroup; CIDR format validated before insertion
-  - Encryption key rotation (`/key-versions/rotate`): marks current ACTIVE as ROTATED, creates next version with 180-day expiry
+  - IP allowlist CRUD (`/ip-allowlist`): manage CIDR entries per routeGroup; strict IPv4/CIDR parsing with canonical prefix checks
+  - Encryption key rotation: automatic scheduler enforcement (default on) plus manual `/key-versions/rotate` endpoint
   - Diagnostics endpoint (`/diagnostics`): process memory, uptime, live DB record counts, key version status, performance design notes
   - Structured logging: `createDomainLogger(logger, domain)` utility for per-subsystem log filtering
 
@@ -251,6 +256,8 @@ Response:
 | `LOGIN_WINDOW_MINUTES` | `15` | `15` | Window for login throttle counting |
 | `BACKUP_DIR` | `../backups` | `/app/backups` | Encrypted snapshot directory |
 | `IP_ALLOWLIST_STRICT_MODE` | `true` (fail-closed) | `true` (fail-closed) | Default. Privileged route groups with zero active allowlist entries deny every request. Set to `false` only for fully-offline/air-gapped dev bootstraps where you want the legacy open-by-default posture (an empty active allowlist permits all IPs). |
+| `KEY_ROTATION_SCHEDULER_ENABLED` | `true` | `true` | Enables automatic overdue key-rotation pass at runtime. |
+| `KEY_ROTATION_CHECK_INTERVAL_MS` | `86400000` | `86400000` | Key-rotation scheduler cadence in milliseconds (default: 24h). |
 
 > **Startup requirement:** in every non-test environment, `ENCRYPTION_MASTER_KEY` must be set to a cryptographically random 64-hex-character string (`openssl rand -hex 32`). Pass via environment variable or `.env` file — never commit.
 
@@ -258,7 +265,7 @@ Response:
 
 - **Authentication:** Local username/password via scrypt hashing wrapped in AES-256-GCM envelope at rest. Opaque session tokens (SHA-256 hash stored, plaintext returned once).
 - **Authorization:** RBAC with 7 roles. Route-level (`fastify.authenticate`, `fastify.requireRole`) and service-level guards.
-- **Encryption at rest:** AES-256-GCM with HKDF-derived per-version keys. 180-day rotation.
+- **Encryption at rest:** AES-256-GCM with HKDF-derived per-version keys. 180-day rotation with automatic scheduler enforcement.
 - **Rate limiting:** 120 req/min per authenticated principal. Login throttle: 5 failures/15 min.
 - **IP allowlists:** IPv4 CIDR enforcement on privileged route groups with fail-closed behavior on allowlist lookup errors. **Default is fail-closed**: a privileged route group with zero active entries denies every request. Operators bootstrapping a fresh deployment must add at least one active `IpAllowlistEntry` per privileged route group (`admin`, `backup`) or set `IP_ALLOWLIST_STRICT_MODE=false` as an explicit opt-out (legacy open-by-default posture, offline/dev only).
 - **Audit trail:** Append-only events with SHA-256 before/after digests.
@@ -269,6 +276,7 @@ Response:
 - **API Server:** Fastify app serving domain routes under `/api/*` plus `/health`.
 - **Background Scheduler (Warehouse):** appointment expiry pass auto-transitions stale PENDING appointments.
 - **Background Scheduler (CMS):** scheduled article publish pass transitions due SCHEDULED articles.
+- **Background Scheduler (Admin):** automatic key-rotation pass rotates overdue encryption key versions.
 - **Persistence:** single-node SQLite via Prisma.
 
 ## Data Retention Policy

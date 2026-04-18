@@ -12,6 +12,8 @@ export interface AppConfig {
   // Operational
   backupDir?: string;            // local directory for encrypted backup snapshots
   ipAllowlistStrictMode?: boolean; // when true, empty active allowlist denies all; default false
+  keyRotationSchedulerEnabled?: boolean; // when true, key-rotation scheduler enforces overdue rotations
+  keyRotationCheckIntervalMs?: number; // scheduler cadence in milliseconds
 }
 
 export class ConfigError extends Error {
@@ -40,6 +42,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     // to restore the legacy open-by-default posture (only recommended for
     // fully-offline/air-gapped single-node dev bootstraps).
     ipAllowlistStrictMode: (env.IP_ALLOWLIST_STRICT_MODE ?? 'true').toLowerCase() !== 'false',
+    keyRotationSchedulerEnabled:
+      (env.KEY_ROTATION_SCHEDULER_ENABLED ?? 'true').toLowerCase() !== 'false',
+    keyRotationCheckIntervalMs: parseInt(env.KEY_ROTATION_CHECK_INTERVAL_MS ?? '86400000', 10),
   };
   assertEncryptionKeyOrFail(config);
   return config;

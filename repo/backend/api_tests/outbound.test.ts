@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { FastifyInstance } from 'fastify';
+import { seedUserWithSession, authHeader } from './_helpers.js';
 
 // NOTE: Unauthenticated and schema-validation tests do NOT require a migrated DB.
 // Tests that create real orders/waves/pick tasks require a migrated test database
@@ -96,7 +97,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { type: 'SALES', lines: [{ skuId: 'x', quantity: 1 }] },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
     const body = JSON.parse(res.payload);
     expect(body.success).toBe(false);
   });
@@ -108,7 +109,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { facilityId: 'x', type: 'SALES' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/orders lines=[] → 400 (minItems: 1)', async () => {
@@ -118,7 +119,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { facilityId: 'x', type: 'SALES', lines: [] },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/orders invalid type → 400', async () => {
@@ -128,7 +129,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { facilityId: 'x', type: 'INVALID', lines: [{ skuId: 'y', quantity: 1 }] },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/waves missing facilityId → 400', async () => {
@@ -138,7 +139,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { orderIds: ['x'] },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/waves missing orderIds → 400', async () => {
@@ -148,7 +149,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { facilityId: 'x' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/orders/:id/pack-verify missing actualWeightLb → 400', async () => {
@@ -158,7 +159,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { actualVolumeCuFt: 5 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/orders/:id/exceptions missing lineId → 400', async () => {
@@ -168,7 +169,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { shortageReason: 'STOCKOUT', quantityShort: 1 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/orders/:id/exceptions invalid shortageReason → 400', async () => {
@@ -178,7 +179,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { lineId: 'x', shortageReason: 'INVALID', quantityShort: 1 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/orders/:id/handoff missing carrier → 400', async () => {
@@ -188,7 +189,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: {},
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/orders/:id/pack-verify missing actualVolumeCuFt → 400', async () => {
@@ -198,7 +199,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { actualWeightLb: 10 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/orders/:id/pack-verify actualWeightLb=0 → 400 (exclusiveMinimum)', async () => {
@@ -208,7 +209,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { actualWeightLb: 0, actualVolumeCuFt: 5 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/waves orderIds=[] → 400 (minItems: 1)', async () => {
@@ -218,7 +219,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { facilityId: 'x', orderIds: [] },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('PATCH /api/outbound/pick-tasks/:id invalid status → 400', async () => {
@@ -228,7 +229,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { status: 'INVALID_STATUS' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/outbound/orders/:id/exceptions missing quantityShort → 400', async () => {
@@ -238,7 +239,7 @@ describe('Outbound — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { lineId: 'y', shortageReason: 'STOCKOUT' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 });
 
@@ -259,16 +260,72 @@ describe('Outbound — Error envelope shape', () => {
     expect(body.meta).toHaveProperty('timestamp');
   });
 
-  it('400 validation error has VALIDATION_FAILED code', async () => {
+  it('400 validation error has UNAUTHORIZED code', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/outbound/orders',
       headers: { authorization: 'Bearer fake' },
       payload: {},
     });
+    expect(res.statusCode).toBe(401);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('UNAUTHORIZED');
+  });
+});
+
+describe('Outbound — Authenticated validation failures [DB-required]', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => { app = await buildApp({ config: TEST_CONFIG }); });
+  afterEach(async () => { await app.close(); });
+
+  it('POST /api/outbound/orders missing required fields → 400 VALIDATION_FAILED', async () => {
+    const operator = await seedUserWithSession(app, ['WAREHOUSE_OPERATOR']);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/outbound/orders',
+      headers: authHeader(operator.token),
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('POST /api/outbound/waves missing orderIds → 400 VALIDATION_FAILED', async () => {
+    const operator = await seedUserWithSession(app, ['WAREHOUSE_OPERATOR']);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/outbound/waves',
+      headers: { ...authHeader(operator.token), 'idempotency-key': 'valid-idempotency-key-1' },
+      payload: { facilityId: 'fac-1' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('POST /api/outbound/orders/:id/pack-verify missing actualVolumeCuFt → 400 VALIDATION_FAILED', async () => {
+    const operator = await seedUserWithSession(app, ['WAREHOUSE_OPERATOR']);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/outbound/orders/order-1/pack-verify',
+      headers: authHeader(operator.token),
+      payload: { actualWeightLb: 10 },
+    });
+
     expect(res.statusCode).toBe(400);
     const body = JSON.parse(res.payload);
     expect(body.success).toBe(false);
     expect(body.error.code).toBe('VALIDATION_FAILED');
   });
 });
+

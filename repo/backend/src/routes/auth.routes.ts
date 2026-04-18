@@ -124,9 +124,22 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
         ipAddress: request.ip ?? null,
       });
 
-      await auditCreate(fastify.prisma, user.id, 'Session', tokenHash.slice(0, 16), null, {
-        ip: request.ip,
-      });
+      // Non-empty sanitized after-state so the audit digest is deterministic
+      // and non-empty. The raw token is never persisted; only a hash prefix.
+      const tokenHashPrefix = tokenHash.slice(0, 16);
+      await auditCreate(
+        fastify.prisma,
+        user.id,
+        'Session',
+        tokenHashPrefix,
+        {
+          userId: user.id,
+          tokenHashPrefix,
+          expiresAt: expiresAt.toISOString(),
+          passwordVersion: user.passwordVersion,
+        },
+        { ip: request.ip ?? null },
+      );
 
       const userRoles = user.roles.map((r) => r.role as RoleType);
       return reply.status(200).send(

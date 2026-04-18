@@ -397,6 +397,36 @@ describe('Warehouse depth — role checks and appointment transitions', () => {
     expect(JSON.parse(getCancelled.payload).data.state).toBe('CANCELLED');
   });
 
+  it('requires a non-empty transition reason on appointment confirm', async () => {
+    const manager = await seedUserWithSession(app, ['WAREHOUSE_MANAGER']);
+    const facilityId = await createFacility(manager.token, 'FAC-REASON');
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/warehouse/appointments',
+      headers: authHeader(manager.token),
+      payload: {
+        facilityId,
+        type: 'INBOUND',
+        scheduledAt: new Date(Date.now() + 45 * 60 * 1000).toISOString(),
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const appointmentId = JSON.parse(created.payload).data.id as string;
+
+    const confirm = await app.inject({
+      method: 'POST',
+      url: `/api/warehouse/appointments/${appointmentId}/confirm`,
+      headers: authHeader(manager.token),
+      payload: {},
+    });
+
+    expect(confirm.statusCode).toBe(400);
+    const body = JSON.parse(confirm.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+
   it('returns populated collection payloads for facilities, locations, skus, lots, and appointments', async () => {
     const manager = await seedUserWithSession(app, ['WAREHOUSE_MANAGER']);
     const facilityId = await createFacility(manager.token, 'FAC-LIST');

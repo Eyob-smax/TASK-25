@@ -6,14 +6,14 @@ import type { PrismaClient } from '@prisma/client';
 export async function findUserByUsername(prisma: PrismaClient, username: string) {
   return prisma.user.findUnique({
     where: { username },
-    include: { roles: true },
+    include: { roles: { where: { isActive: true, deletedAt: null } } },
   });
 }
 
 export async function findUserById(prisma: PrismaClient, id: string) {
   return prisma.user.findUnique({
     where: { id },
-    include: { roles: true },
+    include: { roles: { where: { isActive: true, deletedAt: null } } },
   });
 }
 
@@ -42,10 +42,11 @@ export async function createUser(
           id: randomUUID(),
           role,
           assignedBy,
+          isActive: true,
         })),
       },
     },
-    include: { roles: true },
+    include: { roles: { where: { isActive: true, deletedAt: null } } },
   });
 }
 
@@ -67,14 +68,32 @@ export async function setUserRoles(
   newRoles: string[],
   assignedBy: string,
 ) {
-  return prisma.$transaction([
-    prisma.userRole.deleteMany({ where: { userId } }),
-    ...newRoles.map((role) =>
-      prisma.userRole.create({
-        data: { id: randomUUID(), userId, role, assignedBy },
-      }),
-    ),
-  ]);
+  const now = new Date();
+  return prisma.$transaction(async (tx) => {
+    await tx.userRole.updateMany({
+      where: { userId, isActive: true, deletedAt: null },
+      data: { isActive: false, deletedAt: now, deletedBy: assignedBy },
+    });
+
+    for (const role of newRoles) {
+      await tx.userRole.upsert({
+        where: { userId_role: { userId, role } },
+        update: {
+          isActive: true,
+          deletedAt: null,
+          deletedBy: null,
+          assignedBy,
+        },
+        create: {
+          id: randomUUID(),
+          userId,
+          role,
+          assignedBy,
+          isActive: true,
+        },
+      });
+    }
+  });
 }
 
 // ---- Session ----
@@ -104,7 +123,9 @@ export async function createSession(
 export async function findSessionByTokenHash(prisma: PrismaClient, tokenHash: string) {
   return prisma.session.findUnique({
     where: { token: tokenHash },
-    include: { user: { include: { roles: true } } },
+    include: {
+      user: { include: { roles: { where: { isActive: true, deletedAt: null } } } },
+    },
   });
 }
 
@@ -157,6 +178,6 @@ export async function incrementRateLimitBucket(prisma: PrismaClient, bucketId: s
 
 export async function getIpAllowlistForGroup(prisma: PrismaClient, routeGroup: string) {
   return prisma.ipAllowlistEntry.findMany({
-    where: { routeGroup, isActive: true },
+    where: { routeGroup, isActive: true, deletedAt: null },
   });
 }

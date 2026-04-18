@@ -1,5 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
-import type { RoleType } from '../shared/enums.js';
+import { Role, type RoleType } from '../shared/enums.js';
 import { ErrorCode } from '../shared/envelope.js';
 import { generateInvoiceNumber, getRetentionExpiryDate } from '../shared/invariants.js';
 import { RETENTION_YEARS } from '../shared/types.js';
@@ -26,6 +26,7 @@ import {
   findPaymentByInvoiceNumber,
   countPaymentsCreatedToday,
   updatePaymentStatus as repoUpdatePaymentStatus,
+  softDeletePayment as repoSoftDeletePayment,
 } from '../repositories/membership.repository.js';
 
 export class MembershipServiceError extends Error {
@@ -36,6 +37,27 @@ export class MembershipServiceError extends Error {
     super(message);
     this.name = 'MembershipServiceError';
   }
+}
+
+export interface MembershipAccessPrincipal {
+  userId: string;
+  roles: RoleType[];
+}
+
+function hasElevatedMembershipAccess(roles: RoleType[]): boolean {
+  return roles.includes(Role.SYSTEM_ADMIN);
+}
+
+function memberCreatorScope(principal: MembershipAccessPrincipal): { createdBy?: string } {
+  return hasElevatedMembershipAccess(principal.roles) ? {} : { createdBy: principal.userId };
+}
+
+async function findScopedMember(
+  prisma: PrismaClient,
+  memberId: string,
+  principal: MembershipAccessPrincipal,
+) {
+  return findMemberById(prisma, memberId, memberCreatorScope(principal));
 }
 
 // ---- Member ----
@@ -90,6 +112,7 @@ export async function createMember(
   const member = await repoCreateMember(prisma, {
     memberNumber: encryptedMemberNumber,
     memberNumberHash,
+    createdBy: actorId,
     firstName: data.firstName,
     lastName: data.lastName,
     email: encryptedEmail,
@@ -108,14 +131,14 @@ export async function createMember(
 export async function getMember(
   prisma: PrismaClient,
   memberId: string,
-  viewerRoles: RoleType[],
+  principal: MembershipAccessPrincipal,
   masterKey: Buffer,
 ) {
-  const member = await findMemberById(prisma, memberId);
+  const member = await findScopedMember(prisma, memberId, principal);
   if (!member) throw new MembershipServiceError(ErrorCode.NOT_FOUND, 'Member not found');
 
   const decrypted = decryptMemberFields(member, masterKey);
-  const masked = applyMemberMasking(decrypted, viewerRoles);
+  const masked = applyMemberMasking(decrypted, principal.roles);
 
   return {
     ...member,
@@ -128,13 +151,16 @@ export async function getMember(
 export async function listMembers(
   prisma: PrismaClient,
   opts: { includeInactive?: boolean },
-  viewerRoles: RoleType[],
+  principal: MembershipAccessPrincipal,
   masterKey: Buffer,
 ) {
-  const members = await repoListMembers(prisma, opts);
+  const members = await repoListMembers(prisma, {
+    ...opts,
+    ...memberCreatorScope(principal),
+  });
   return members.map((m) => {
     const decrypted = decryptMemberFields(m, masterKey);
-    const masked = applyMemberMasking(decrypted, viewerRoles);
+    const masked = applyMemberMasking(decrypted, principal.roles);
     return { ...m, ...masked };
   });
 }
@@ -143,11 +169,12 @@ export async function updateMember(
   prisma: PrismaClient,
   memberId: string,
   data: { firstName?: string; lastName?: string; email?: string; phone?: string; isActive?: boolean },
+  principal: MembershipAccessPrincipal,
   actorId: string,
   masterKey: Buffer,
   keyVersion: number,
 ) {
-  const existing = await findMemberById(prisma, memberId);
+  const existing = await findScopedMember(prisma, memberId, principal);
   if (!existing) throw new MembershipServiceError(ErrorCode.NOT_FOUND, 'Member not found');
 
   const before = { firstName: existing.firstName, lastName: existing.lastName };
@@ -237,9 +264,10 @@ export async function createEnrollment(
   prisma: PrismaClient,
   memberId: string,
   data: { packageId: string; startDate: Date; endDate?: Date },
+  principal: MembershipAccessPrincipal,
   actorId: string,
 ) {
-  const member = await findMemberById(prisma, memberId);
+  const member = await findScopedMember(prisma, memberId, principal);
   if (!member) throw new MembershipServiceError(ErrorCode.NOT_FOUND, 'Member not found');
 
   const pkg = await findPackageById(prisma, data.packageId);
@@ -269,8 +297,12 @@ export async function createEnrollment(
   return enrollment;
 }
 
-export async function listEnrollments(prisma: PrismaClient, memberId: string) {
-  const member = await findMemberById(prisma, memberId);
+export async function listEnrollments(
+  prisma: PrismaClient,
+  memberId: string,
+  principal: MembershipAccessPrincipal,
+) {
+  const member = await findScopedMember(prisma, memberId, principal);
   if (!member) throw new MembershipServiceError(ErrorCode.NOT_FOUND, 'Member not found');
   return listEnrollmentsByMember(prisma, memberId);
 }
@@ -317,7 +349,6 @@ export async function recordPayment(
     : undefined;
 
   const paidAt = data.paidAt ?? today;
-  const retentionExpiresAt = getRetentionExpiryDate(paidAt, RETENTION_YEARS.billing);
 
   const payment = await repoCreatePaymentRecord(prisma, {
     memberId: data.memberId,
@@ -331,7 +362,8 @@ export async function recordPayment(
     status: 'RECORDED',
     paidAt,
     createdBy: actorId,
-    retentionExpiresAt,
+    // Billing retention is deletion-anchored; expiry is set when the record is soft-deleted.
+    retentionExpiresAt: null,
   });
 
   await auditCreate(prisma, actorId, 'PaymentRecord', payment.id, {
@@ -405,4 +437,37 @@ export async function updatePaymentStatus(
   await repoUpdatePaymentStatus(prisma, paymentId, newStatus);
   await auditUpdate(prisma, actorId, 'PaymentRecord', paymentId, before, { status: newStatus });
   return findPaymentById(prisma, paymentId);
+}
+
+export async function softDeletePayment(
+  prisma: PrismaClient,
+  paymentId: string,
+  actorId: string,
+) {
+  const payment = await findPaymentById(prisma, paymentId);
+  if (!payment) throw new MembershipServiceError(ErrorCode.NOT_FOUND, 'Payment not found');
+
+  const deletedAt = new Date();
+  const retentionExpiresAt = getRetentionExpiryDate(deletedAt, RETENTION_YEARS.billing);
+
+  const updated = await repoSoftDeletePayment(prisma, paymentId, deletedAt, retentionExpiresAt);
+
+  await auditUpdate(
+    prisma,
+    actorId,
+    'PaymentRecord',
+    paymentId,
+    { deletedAt: null, retentionExpiresAt: payment.retentionExpiresAt },
+    {
+      deletedAt: updated.deletedAt?.toISOString() ?? null,
+      retentionExpiresAt: updated.retentionExpiresAt?.toISOString() ?? null,
+    },
+    { reason: 'payment-soft-delete', retentionYears: RETENTION_YEARS.billing },
+  );
+
+  return {
+    id: updated.id,
+    deletedAt: updated.deletedAt,
+    retentionExpiresAt: updated.retentionExpiresAt,
+  };
 }

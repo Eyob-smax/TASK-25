@@ -54,11 +54,18 @@ export async function createParameter(
 }
 
 export async function findParameterByKey(prisma: PrismaClient, key: string) {
+  return prisma.parameterDictionaryEntry.findFirst({ where: { key, deletedAt: null } });
+}
+
+export async function findParameterByKeyIncludingDeleted(prisma: PrismaClient, key: string) {
   return prisma.parameterDictionaryEntry.findUnique({ where: { key } });
 }
 
 export async function listParameters(prisma: PrismaClient) {
-  return prisma.parameterDictionaryEntry.findMany({ orderBy: { key: 'asc' } });
+  return prisma.parameterDictionaryEntry.findMany({
+    where: { deletedAt: null },
+    orderBy: { key: 'asc' },
+  });
 }
 
 export async function updateParameter(
@@ -76,8 +83,35 @@ export async function updateParameter(
   });
 }
 
-export async function deleteParameter(prisma: PrismaClient, key: string) {
-  return prisma.parameterDictionaryEntry.delete({ where: { key } });
+export async function restoreParameter(
+  prisma: PrismaClient,
+  key: string,
+  data: { value: string; description?: string; updatedBy: string },
+) {
+  return prisma.parameterDictionaryEntry.update({
+    where: { key },
+    data: {
+      value: data.value,
+      description: data.description ?? null,
+      updatedBy: data.updatedBy,
+      deletedAt: null,
+      deletedBy: null,
+    },
+  });
+}
+
+export async function softDeleteParameter(
+  prisma: PrismaClient,
+  key: string,
+  deletedBy: string,
+) {
+  return prisma.parameterDictionaryEntry.update({
+    where: { key },
+    data: {
+      deletedAt: new Date(),
+      deletedBy,
+    },
+  });
 }
 
 // ---- IpAllowlistEntry ----
@@ -98,7 +132,7 @@ export async function createIpAllowlistEntry(
 }
 
 export async function findIpAllowlistEntryById(prisma: PrismaClient, id: string) {
-  return prisma.ipAllowlistEntry.findUnique({ where: { id } });
+  return prisma.ipAllowlistEntry.findFirst({ where: { id, deletedAt: null } });
 }
 
 export async function listIpAllowlistEntries(
@@ -106,7 +140,10 @@ export async function listIpAllowlistEntries(
   routeGroup?: string,
 ) {
   return prisma.ipAllowlistEntry.findMany({
-    where: routeGroup ? { routeGroup } : undefined,
+    where: {
+      deletedAt: null,
+      ...(routeGroup ? { routeGroup } : {}),
+    },
     orderBy: [{ routeGroup: 'asc' }, { createdAt: 'asc' }],
   });
 }
@@ -119,17 +156,31 @@ export async function updateIpAllowlistEntry(
   return prisma.ipAllowlistEntry.update({ where: { id }, data });
 }
 
-export async function deleteIpAllowlistEntry(prisma: PrismaClient, id: string) {
-  return prisma.ipAllowlistEntry.delete({ where: { id } });
+export async function softDeleteIpAllowlistEntry(
+  prisma: PrismaClient,
+  id: string,
+  deletedBy: string,
+) {
+  return prisma.ipAllowlistEntry.update({
+    where: { id },
+    data: {
+      deletedAt: new Date(),
+      deletedBy,
+      isActive: false,
+    },
+  });
 }
 
 // ---- Retention queries ----
 
+// Billing purge is gated on retentionExpiresAt, which is set to
+// deletedAt + 7y when a PaymentRecord is soft-deleted. Records without
+// an expiry (still active, or never anchored) are never eligible.
 export async function countEligibleBillingRecords(prisma: PrismaClient, now: Date) {
   return prisma.paymentRecord.count({
     where: {
       deletedAt: { not: null },
-      retentionExpiresAt: { lt: now },
+      retentionExpiresAt: { not: null, lt: now },
     },
   });
 }
@@ -138,7 +189,7 @@ export async function purgeEligibleBillingRecords(prisma: PrismaClient, now: Dat
   return prisma.paymentRecord.deleteMany({
     where: {
       deletedAt: { not: null },
-      retentionExpiresAt: { lt: now },
+      retentionExpiresAt: { not: null, lt: now },
     },
   });
 }
@@ -182,8 +233,8 @@ export async function getDatabaseCounts(prisma: PrismaClient) {
     prisma.paymentRecord.count({ where: { deletedAt: null } }),
     prisma.auditEvent.count(),
     prisma.backupSnapshot.count(),
-    prisma.parameterDictionaryEntry.count(),
-    prisma.ipAllowlistEntry.count({ where: { isActive: true } }),
+    prisma.parameterDictionaryEntry.count({ where: { deletedAt: null } }),
+    prisma.ipAllowlistEntry.count({ where: { isActive: true, deletedAt: null } }),
     prisma.outboundOrder.count({ where: { deletedAt: null } }),
     prisma.appointment.count(),
   ]);

@@ -67,10 +67,10 @@ describe('Validation envelope — global error handler normalization', () => {
     expect(Array.isArray(body.error.details)).toBe(true);
   });
 
-  it('returns VALIDATION_FAILED for protected routes when fake auth token is provided', async () => {
+  it('returns UNAUTHORIZED for protected routes when fake auth token is provided', async () => {
     // An invalid Bearer token leaves `request.principal` null. The auth-
-    // before-validation barrier must short-circuit with 401 — NOT leak a
-    // 400 VALIDATION_FAILED envelope full of schema hints.
+    // before-validation barrier must short-circuit with 401 — never leaking
+    // validation-schema hints to unauthenticated callers.
     const res = await app.inject({
       method: 'POST',
       url: '/api/warehouse/facilities',
@@ -78,13 +78,13 @@ describe('Validation envelope — global error handler normalization', () => {
       payload: { code: 'FAC-ONLY' },
     });
 
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
     const body = JSON.parse(res.payload);
     expect(body.success).toBe(false);
-    expect(body.error.code).toBe('VALIDATION_FAILED');
+    expect(body.error.code).toBe('UNAUTHORIZED');
   });
 
-  it('returns VALIDATION_FAILED on outbound routes when fake auth token is provided', async () => {
+  it('returns UNAUTHORIZED on outbound routes when fake auth token is provided', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/outbound/orders',
@@ -92,13 +92,13 @@ describe('Validation envelope — global error handler normalization', () => {
       payload: {},
     });
 
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
     const body = JSON.parse(res.payload);
     expect(body.success).toBe(false);
-    expect(body.error.code).toBe('VALIDATION_FAILED');
+    expect(body.error.code).toBe('UNAUTHORIZED');
   });
 
-  it('returns VALIDATION_FAILED on strategy routes when fake auth token is provided', async () => {
+  it('returns UNAUTHORIZED on strategy routes when fake auth token is provided', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/strategy/rulesets',
@@ -106,9 +106,9 @@ describe('Validation envelope — global error handler normalization', () => {
       payload: {},
     });
 
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
     const body = JSON.parse(res.payload);
     expect(body.success).toBe(false);
-    expect(body.error.code).toBe('VALIDATION_FAILED');
+    expect(body.error.code).toBe('UNAUTHORIZED');
   });
 });

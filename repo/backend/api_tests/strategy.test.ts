@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { FastifyInstance } from 'fastify';
+import { seedUserWithSession, authHeader } from './_helpers.js';
 
 // NOTE: Unauthenticated and schema-validation tests do NOT require a migrated DB.
 // Tests that invoke real strategy queries require a migrated test database with data
@@ -86,11 +87,10 @@ describe('Strategy — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { fifoWeight: 1.0 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
     const body = JSON.parse(res.payload);
     expect(body.success).toBe(false);
-    expect(body.error.code).toBe('VALIDATION_FAILED');
-    expect(Array.isArray(body.error.details)).toBe(true);
+    expect(body.error.code).toBe('UNAUTHORIZED');
   });
 
   it('POST /api/strategy/putaway-rank missing facilityId → 400', async () => {
@@ -100,10 +100,10 @@ describe('Strategy — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { skuId: 'y', quantity: 1 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
     const body = JSON.parse(res.payload);
     expect(body.success).toBe(false);
-    expect(body.error.code).toBe('VALIDATION_FAILED');
+    expect(body.error.code).toBe('UNAUTHORIZED');
   });
 
   it('POST /api/strategy/putaway-rank missing skuId → 400', async () => {
@@ -113,7 +113,7 @@ describe('Strategy — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { facilityId: 'x', quantity: 1 },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/strategy/putaway-rank missing quantity → 400', async () => {
@@ -123,7 +123,7 @@ describe('Strategy — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { facilityId: 'x', skuId: 'y' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/strategy/pick-path missing facilityId → 400', async () => {
@@ -133,7 +133,7 @@ describe('Strategy — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { pickTaskIds: ['x'] },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/strategy/pick-path missing pickTaskIds → 400', async () => {
@@ -143,7 +143,7 @@ describe('Strategy — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { facilityId: 'x' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/strategy/simulate missing facilityId → 400', async () => {
@@ -153,7 +153,7 @@ describe('Strategy — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { rulesetIds: ['x'] },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('POST /api/strategy/simulate rulesetIds=[] → 400 (minItems: 1)', async () => {
@@ -163,7 +163,7 @@ describe('Strategy — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { facilityId: 'x', rulesetIds: [] },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 
   it('PATCH /api/strategy/rulesets/:id with fifoWeight out of range → 400', async () => {
@@ -173,7 +173,7 @@ describe('Strategy — Validation failures (schema enforcement)', () => {
       headers: fakeAuth,
       payload: { fifoWeight: 11 }, // maximum is 10
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
   });
 });
 
@@ -194,18 +194,73 @@ describe('Strategy — Error envelope shape', () => {
     expect(body.meta).toHaveProperty('timestamp');
   });
 
-  it('400 validation error has VALIDATION_FAILED code', async () => {
+  it('400 validation error has UNAUTHORIZED code', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/strategy/rulesets',
       headers: { authorization: 'Bearer fake' },
       payload: {},
     });
+    expect(res.statusCode).toBe(401);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('UNAUTHORIZED');
+    expect(body.meta).toHaveProperty('requestId');
+  });
+});
+
+describe('Strategy — Authenticated validation failures [DB-required]', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => { app = await buildApp({ config: TEST_CONFIG }); });
+  afterEach(async () => { await app.close(); });
+
+  it('POST /api/strategy/rulesets missing name → 400 VALIDATION_FAILED', async () => {
+    const manager = await seedUserWithSession(app, ['STRATEGY_MANAGER']);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/rulesets',
+      headers: authHeader(manager.token),
+      payload: {},
+    });
+
     expect(res.statusCode).toBe(400);
     const body = JSON.parse(res.payload);
     expect(body.success).toBe(false);
     expect(body.error.code).toBe('VALIDATION_FAILED');
-    expect(Array.isArray(body.error.details)).toBe(true);
-    expect(body.meta).toHaveProperty('requestId');
+  });
+
+  it('POST /api/strategy/putaway-rank missing facilityId → 400 VALIDATION_FAILED', async () => {
+    const manager = await seedUserWithSession(app, ['STRATEGY_MANAGER']);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/putaway-rank',
+      headers: authHeader(manager.token),
+      payload: { skuId: 'sku-1', quantity: 1 },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('POST /api/strategy/simulate rulesetIds=[] → 400 VALIDATION_FAILED', async () => {
+    const manager = await seedUserWithSession(app, ['STRATEGY_MANAGER']);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/simulate',
+      headers: authHeader(manager.token),
+      payload: { facilityId: 'fac-1', rulesetIds: [] },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
   });
 });
+

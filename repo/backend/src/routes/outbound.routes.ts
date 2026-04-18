@@ -56,7 +56,7 @@ export const outboundRoutes: FastifyPluginAsync = async (fastify) => {
     { schema: { querystring: listOrdersQuerySchema }, preHandler: [fastify.authenticate, fastify.requireRole(operatorRoles)] },
     async (request, reply) => {
       const query = request.query as { facilityId?: string; status?: string };
-      const orders = await listOutboundOrders(fastify.prisma, query);
+      const orders = await listOutboundOrders(fastify.prisma, query, request.principal!);
       return reply.status(200).send(successResponse(orders, request.id));
     },
   );
@@ -94,7 +94,7 @@ export const outboundRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       try {
         const { orderId } = request.params as { orderId: string };
-        const order = await getOutboundOrder(fastify.prisma, orderId);
+        const order = await getOutboundOrder(fastify.prisma, orderId, request.principal!);
         return reply.status(200).send(successResponse(order, request.id));
       } catch (err) {
         return handleServiceError(err, request as never, reply, request.id);
@@ -128,7 +128,13 @@ export const outboundRoutes: FastifyPluginAsync = async (fastify) => {
           quantityShort: number;
           notes?: string;
         };
-        const result = await reportException(fastify.prisma, orderId, body, request.principal!.userId);
+        const result = await reportException(
+          fastify.prisma,
+          orderId,
+          body,
+          request.principal!.userId,
+          request.principal!,
+        );
         return reply.status(201).send(successResponse(result, request.id));
       } catch (err) {
         return handleServiceError(err, request as never, reply, request.id);
@@ -143,7 +149,13 @@ export const outboundRoutes: FastifyPluginAsync = async (fastify) => {
       try {
         const { orderId } = request.params as { orderId: string };
         const body = request.body as { actualWeightLb: number; actualVolumeCuFt: number };
-        const verification = await verifyPack(fastify.prisma, orderId, body, request.principal!.userId);
+        const verification = await verifyPack(
+          fastify.prisma,
+          orderId,
+          body,
+          request.principal!.userId,
+          request.principal!,
+        );
         return reply.status(200).send(successResponse(verification, request.id));
       } catch (err) {
         return handleServiceError(err, request as never, reply, request.id);
@@ -158,7 +170,13 @@ export const outboundRoutes: FastifyPluginAsync = async (fastify) => {
       try {
         const { orderId } = request.params as { orderId: string };
         const body = request.body as { carrier: string; trackingNumber?: string; notes?: string };
-        const handoff = await recordHandoff(fastify.prisma, orderId, body, request.principal!.userId);
+        const handoff = await recordHandoff(
+          fastify.prisma,
+          orderId,
+          body,
+          request.principal!.userId,
+          request.principal!,
+        );
         return reply.status(201).send(successResponse(handoff, request.id));
       } catch (err) {
         return handleServiceError(err, request as never, reply, request.id);
@@ -173,7 +191,7 @@ export const outboundRoutes: FastifyPluginAsync = async (fastify) => {
     { schema: { querystring: listWavesQuerySchema }, preHandler: [fastify.authenticate, fastify.requireRole(operatorRoles)] },
     async (request, reply) => {
       const query = request.query as { facilityId?: string; status?: string };
-      const waves = await listWaves(fastify.prisma, query);
+      const waves = await listWaves(fastify.prisma, query, request.principal!);
       return reply.status(200).send(successResponse(waves, request.id));
     },
   );
@@ -195,6 +213,7 @@ export const outboundRoutes: FastifyPluginAsync = async (fastify) => {
           idempotencyKey,
           body,
           request.principal!.userId,
+          request.principal!,
         );
         const status = result.fromCache ? 200 : 201;
         return reply.status(status).send(successResponse(result.wave, request.id));
@@ -210,7 +229,7 @@ export const outboundRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       try {
         const { waveId } = request.params as { waveId: string };
-        const wave = await getWave(fastify.prisma, waveId);
+        const wave = await getWave(fastify.prisma, waveId, request.principal!);
         return reply.status(200).send(successResponse(wave, request.id));
       } catch (err) {
         return handleServiceError(err, request as never, reply, request.id);
@@ -240,7 +259,7 @@ export const outboundRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       try {
         const { taskId } = request.params as { taskId: string };
-        const task = await getPickTask(fastify.prisma, taskId);
+        const task = await getPickTask(fastify.prisma, taskId, request.principal!);
         return reply.status(200).send(successResponse(task, request.id));
       } catch (err) {
         return handleServiceError(err, request as never, reply, request.id);
@@ -259,7 +278,13 @@ export const outboundRoutes: FastifyPluginAsync = async (fastify) => {
           quantityPicked?: number;
           actualDistance?: number;
         };
-        const task = await updatePickTask(fastify.prisma, taskId, body, request.principal!.userId);
+        const task = await updatePickTask(
+          fastify.prisma,
+          taskId,
+          body,
+          request.principal!.userId,
+          request.principal!,
+        );
         return reply.status(200).send(successResponse(task, request.id));
       } catch (err) {
         return handleServiceError(err, request as never, reply, request.id);

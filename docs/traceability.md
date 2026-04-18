@@ -40,12 +40,13 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | IP allowlist enforcement | `unit/security/ipallowlist.test.ts` | isIpAllowed returns false when not in CIDR; open when no active entries |
 | IP allowlist fail-closed mode (`IP_ALLOWLIST_STRICT_MODE=true`) | `unit/security/ipallowlist.test.ts`, `unit/config.test.ts` | isIpAllowed(…, { failClosed: true }) denies when no active entries; config reads env var |
 | IP CIDR matching | `unit/admin/parameterKey.test.ts` | isIpInCidr covers /24, /8, /32, 0.0.0.0/0 |
+| IP CIDR canonical prefix rejection | `unit/services/admin.service.test.ts` | addIpAllowlistEntry rejects non-canonical prefixes such as `/08` and `/+8` |
 | Append-only audit events | `unit/audit/audit.test.ts` | auditCreate, auditUpdate, auditTransition produce expected shape |
 | Log safety (no password/key in logs) | `unit/logging/logger.test.ts` | domain logger uses structured JSON, while redact policy is configured in `src/app.ts` |
 | Response masking by role | `unit/security/masking.test.ts` | maskEmail/maskPhone/maskMemberNumber/maskPaymentLast4 by role |
 | Encryption at rest (AES-256-GCM) | `unit/security/encryption.test.ts` | encryptFieldString/decryptFieldString round-trip |
 | Key version envelope (version byte prefix) | `unit/admin/backup.test.ts` | encryptBuffer embeds version as first 4 bytes |
-| 180-day key rotation | `api/admin.test.ts` | POST /api/admin/key-versions/rotate → 401 without token |
+| 180-day key rotation (manual + automatic scheduler) | `api/admin.test.ts`, `unit/services/keyrotation.scheduler.test.ts`, `unit/config.test.ts` | Manual rotate endpoint remains protected; scheduler initializes/rotates/no-ops correctly; scheduler env flags parsed |
 
 ---
 
@@ -92,16 +93,20 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | PickTask status enum | `unit/enums.test.ts`, `api/outbound.test.ts` | PATCH pick-tasks invalid status → 400 |
 | PickTask terminal states → wave completion | `unit/outbound/shortageHandling.test.ts` | COMPLETED/SHORT/CANCELLED are terminal; PENDING/IN_PROGRESS are not |
 | Pack verification ±5% tolerance | `unit/outbound/packVerification.test.ts`, `api/outbound.depth.test.ts` | invariant coverage plus API 422 VARIANCE_EXCEEDED when tolerance is exceeded |
+| Handoff lifecycle preconditions | `api/outbound.depth.test.ts` | POST handoff before PACKED + PASSED verification is rejected with INVALID_TRANSITION |
 | Pack verification: reject actualWeightLb=0 | `api/outbound.test.ts` | POST pack-verify actualWeightLb=0 → 400 |
 | Pack verification: require both weight+volume | `api/outbound.test.ts` | POST pack-verify missing actualVolumeCuFt → 400 |
+| Pick/exception quantity guardrails | `api/outbound.depth.test.ts` | Exception quantity above remaining line quantity is rejected with VALIDATION_FAILED |
 | Shortage = task.quantity − quantityPicked | `unit/outbound/shortageHandling.test.ts` | computeShortageQuantity covers all cases |
 | ShortageReason enum (STOCKOUT/DAMAGE/OVERSELL) | `unit/outbound/shortageHandling.test.ts`, `unit/enums.test.ts` | 3 values; enum tested |
 | Backorder line (BACKORDER lineType, sourceLineId FK) | `unit/outbound/shortageHandling.test.ts`, `unit/enums.test.ts` | OrderLineType.BACKORDER exists |
 | Manager approval for partial shipment | `api/outbound.test.ts`, `api/outbound.depth.test.ts` | unauthorized guard plus APPROVAL_REQUIRED before approval and successful handoff after approval |
 | Handoff recording | `api/outbound.test.ts` | POST /api/outbound/orders/:id/handoff missing carrier → 400 |
 | Order detail endpoint | `api/outbound.depth.test.ts` | GET `/api/outbound/orders/:orderId` returns order lines and status fields |
+| Outbound object-level operator scope | `api/outbound.depth.test.ts` | Non-manager operator cannot read/list another operator's outbound order |
 | Wave detail + cancellation endpoint | `api/outbound.depth.test.ts` | GET `/api/outbound/waves/:waveId` and PATCH cancel command both return expected wave status |
 | Exception-driven backorder creation | `api/outbound.depth.test.ts` | POST exceptions adds a `BACKORDER` line linked to source line |
+| Pick-task SHORT transactional rollback | `api/outbound.depth.test.ts` | PATCH pick-tasks with SHORT + quantityPicked === task.quantity returns 422 VALIDATION_FAILED and leaves task, order line, and backorder set unchanged |
 
 ---
 
@@ -122,7 +127,7 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | Pick-path endpoint | `api/strategy.test.ts` | POST /api/strategy/pick-path missing facilityId/pickTaskIds → 400 |
 | Ruleset detail + mutation endpoints | `api/strategy.depth.test.ts` | GET/PATCH `/api/strategy/rulesets/:rulesetId` returns persisted ruleset changes |
 | DB-backed pick-path plan quality | `api/strategy.depth.test.ts` | POST `/api/strategy/pick-path` returns ordered sequence with stable non-negative score |
-| 30-day simulation | `api/strategy.test.ts`, `api/strategy.depth.test.ts` | Schema validation plus DB-backed simulation success with deterministic envelope fields |
+| 30-day simulation (strict window) | `api/strategy.test.ts`, `api/strategy.depth.test.ts` | Schema validation plus DB-backed success with `windowDays=30`; non-30 request is rejected |
 | Simulation: local data only, deterministic | `unit/strategy/scoring.test.ts` | All scoring functions are pure (no DB) |
 | Simulation step-distance: structural zone+type metric (replaces string-prefix heuristic) | `unit/strategy/scoring.test.ts` | `estimatePickStepDistance` tests: same location→0, same zone→0.5, different zone→1.0, type-delta penalty, symmetric |
 
@@ -155,7 +160,8 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | Payment last4 format (4 digits) | `api/membership.test.ts` | POST payments last4='ABCD' → 400 |
 | 7-year billing retention | `unit/admin/retention.test.ts` | getBillingRetentionYears()=7; isRetentionPurgeable |
 | Payment retentionExpiresAt | `unit/invariants.test.ts` | getRetentionExpiryDate adds 7 years |
-| Member listing role gate + unmasked memberNumber visibility | `api/membership.depth.test.ts` | MEMBERSHIP_MANAGER sees full memberNumber; WAREHOUSE_OPERATOR gets 403 |
+| Payment soft-delete anchors retentionExpiresAt = deletedAt + 7y | `api/membership.depth.test.ts` | DELETE /api/membership/payments/:id sets retentionExpiresAt 7 years after deletedAt; subsequent GET returns 404; purge-billing hard-deletes once expiry is past |
+| Member listing role gate + unmasked memberNumber visibility | `api/membership.depth.test.ts` | MEMBERSHIP_MANAGER sees full memberNumber; WAREHOUSE_OPERATOR and BILLING_MANAGER get 403 |
 | Payment last4 role masking in API responses | `api/membership.depth.test.ts` | BILLING_MANAGER sees last4; non-billing role receives null |
 
 ---
@@ -210,6 +216,7 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | Retention purgeable: both deletedAt AND expiry required | `unit/admin/retention.test.ts` | null deletedAt=false; null expiry=false |
 | Purge billing → confirm required | `api/admin.test.ts` | POST /api/admin/retention/purge-billing missing confirm → 400 |
 | Purge operational → confirm required | `api/admin.test.ts` | POST /api/admin/retention/purge-operational missing confirm → 400 |
+| Admin confirm enforced at service layer (defense in depth) | `unit/services/admin.service.test.ts` | purgeBillingRecords/purgeOperationalLogs/restoreBackup throw VALIDATION_FAILED when called with confirm=false, regardless of schema |
 | Parameter key format (^[a-zA-Z0-9._:-]+$) | `unit/admin/parameterKey.test.ts` | isValidParameterKey covers valid/invalid patterns |
 | Parameter CRUD → SYSTEM_ADMIN + allowlist required | `api/admin.test.ts`, `api/admin.depth.test.ts` | Collection and key-scoped GET/PUT/DELETE endpoints enforce role/allowlist constraints and persist updates |
 | Parameter: key required | `api/admin.test.ts` | POST /api/admin/parameters missing key → 400 |
@@ -218,7 +225,8 @@ Maps each major original-prompt requirement to concrete backend test files and p
 | IP allowlist detail/mutation endpoints | `api/admin.depth.test.ts` | PATCH/DELETE `/api/admin/ip-allowlist/:entryId` update status and remove entries |
 | IP allowlist: cidr + routeGroup required | `api/admin.test.ts` | POST missing cidr/routeGroup → 400 |
 | IP allowlist: routeGroup enum | `api/admin.test.ts` | POST invalid routeGroup → 400 |
-| Key rotation → auth required | `api/admin.test.ts` | POST /api/admin/key-versions/rotate → 401 without token |
+| Key rotation manual endpoint → auth required | `api/admin.test.ts` | POST /api/admin/key-versions/rotate → 401 without token |
+| Key rotation scheduler behavior | `unit/services/keyrotation.scheduler.test.ts`, `unit/config.test.ts` | Scheduler initializes missing version, rotates overdue version, and no-ops for active non-expired key |
 | Key rotation: keyHash required | `api/admin.test.ts` | POST missing keyHash → 400 |
 | Diagnostics endpoint → auth required | `api/admin.test.ts` | GET /api/admin/diagnostics → 401 without token |
 | Strict-mode allowlist fail-closed behavior | `api/admin.depth.test.ts`, `unit/security/ipallowlist.test.ts` | With `IP_ALLOWLIST_STRICT_MODE=true` and no active entries, diagnostics request is denied with `IP_BLOCKED` |

@@ -57,15 +57,36 @@ export async function findOutboundOrderById(prisma: PrismaClient, id: string) {
   });
 }
 
+export async function findOutboundOrderByIdScoped(
+  prisma: PrismaClient,
+  id: string,
+  opts: { createdBy?: string } = {},
+) {
+  return prisma.outboundOrder.findFirst({
+    where: {
+      id,
+      deletedAt: null,
+      ...(opts.createdBy ? { createdBy: opts.createdBy } : {}),
+    },
+    include: {
+      lines: { include: { sku: true } },
+      packVerifications: { orderBy: { verifiedAt: 'desc' } },
+      handoffRecords: { orderBy: { handoffAt: 'desc' } },
+      pickTasks: { include: { sku: true, location: true }, orderBy: { sequence: 'asc' } },
+    },
+  });
+}
+
 export async function listOutboundOrders(
   prisma: PrismaClient,
-  opts: { facilityId?: string; status?: string } = {},
+  opts: { facilityId?: string; status?: string; createdBy?: string } = {},
 ) {
   return prisma.outboundOrder.findMany({
     where: {
       deletedAt: null,
       ...(opts.facilityId ? { facilityId: opts.facilityId } : {}),
       ...(opts.status ? { status: opts.status } : {}),
+      ...(opts.createdBy ? { createdBy: opts.createdBy } : {}),
     },
     include: { lines: true },
     orderBy: { createdAt: 'desc' },
@@ -243,14 +264,34 @@ export async function findWaveById(prisma: PrismaClient, id: string) {
   });
 }
 
+export async function findWaveByIdScoped(
+  prisma: PrismaClient,
+  id: string,
+  opts: { createdBy?: string } = {},
+) {
+  return prisma.wave.findFirst({
+    where: {
+      id,
+      ...(opts.createdBy ? { createdBy: opts.createdBy } : {}),
+    },
+    include: {
+      pickTasks: {
+        include: { sku: true, location: true, orderLine: true },
+        orderBy: { sequence: 'asc' },
+      },
+    },
+  });
+}
+
 export async function listWaves(
   prisma: PrismaClient,
-  opts: { facilityId?: string; status?: string } = {},
+  opts: { facilityId?: string; status?: string; createdBy?: string } = {},
 ) {
   return prisma.wave.findMany({
     where: {
       ...(opts.facilityId ? { facilityId: opts.facilityId } : {}),
       ...(opts.status ? { status: opts.status } : {}),
+      ...(opts.createdBy ? { createdBy: opts.createdBy } : {}),
     },
     include: { _count: { select: { pickTasks: true } } },
     orderBy: { createdAt: 'desc' },
@@ -266,7 +307,13 @@ export async function updateWaveStatus(prisma: PrismaClient, id: string, status:
 export async function findPickTaskById(prisma: PrismaClient, id: string) {
   return prisma.pickTask.findFirst({
     where: { id },
-    include: { wave: true, orderLine: true, sku: true, location: true },
+    include: {
+      wave: true,
+      order: { select: { id: true, createdBy: true } },
+      orderLine: true,
+      sku: true,
+      location: true,
+    },
   });
 }
 

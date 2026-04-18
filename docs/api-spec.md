@@ -183,7 +183,7 @@ Every create or update operation emits an append-only audit event containing:
 | `timestamp` | ISO 8601 timestamp |
 | `metadata` | Additional context (e.g., transition reason, approval status) |
 
-Audit events are never modified or deleted. They are the source of truth for compliance and operational forensics.
+Audit events are append-only at write time (no in-place updates). Operational retention policy can hard-delete events older than the 2-year retention window via `/api/admin/retention/purge-operational`.
 
 ---
 
@@ -298,6 +298,7 @@ Audit events are never modified or deleted. They are the source of truth for com
 | `POST` | `/api/warehouse/appointments/:id/cancel` | Cancel appointment |
 
 ### 7.3 Outbound Execution — `/api/outbound`
+Access scope: WAREHOUSE_MANAGER/SYSTEM_ADMIN have full outbound visibility. Non-manager operators are scoped to outbound records they created; cross-owner reads return `404 NOT_FOUND`.
 
 | Method | Path | Description |
 |---|---|---|
@@ -308,7 +309,7 @@ Audit events are never modified or deleted. They are the source of truth for com
 | `GET` | `/api/outbound/waves/:id` | Get wave with pick tasks |
 | `PATCH` | `/api/outbound/pick-tasks/:id` | Update pick task status |
 | `POST` | `/api/outbound/orders/:id/pack-verify` | Pack verification (weight/volume) |
-| `POST` | `/api/outbound/orders/:id/handoff` | Record outbound handoff |
+| `POST` | `/api/outbound/orders/:id/handoff` | Record outbound handoff (requires `PACKED` + latest verification `PASSED`) |
 | `POST` | `/api/outbound/orders/:id/exceptions` | Report shortage exception |
 | `PATCH` | `/api/outbound/orders/:id/approve-partial` | Manager approval for partial shipment |
 
@@ -317,6 +318,7 @@ Audit events are never modified or deleted. They are the source of truth for com
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/strategy/rulesets` | Create strategy ruleset |
+| `POST` | `/api/strategy/simulate` | Run fixed 30-day simulation evaluation (`windowDays` must be `30`) |
 | `GET` | `/api/strategy/rulesets` | List strategy rulesets |
 | `GET` | `/api/strategy/rulesets/:rulesetId` | Get ruleset details |
 | `PATCH` | `/api/strategy/rulesets/:rulesetId` | Update ruleset weights |
@@ -329,8 +331,9 @@ Audit events are never modified or deleted. They are the source of truth for com
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/membership/members` | Create member |
-| `GET` | `/api/membership/members` | List members |
-| `GET` | `/api/membership/members/:id` | Get member (masked by role) |
+| `GET` | `/api/membership/members` | List members (MEMBERSHIP_MANAGER/SYSTEM_ADMIN) |
+| `GET` | `/api/membership/members/:id` | Get member (MEMBERSHIP_MANAGER/SYSTEM_ADMIN) |
+| `POST` | `/api/admin/key-versions/rotate` | Manual key rotation (automatic scheduler also enforces overdue rotation) (IP-allowlisted) |
 | `PATCH` | `/api/membership/members/:id` | Update member |
 | `DELETE` | `/api/membership/members/:id` | Soft-delete member |
 | `POST` | `/api/membership/packages` | Create membership package |
@@ -340,6 +343,8 @@ Audit events are never modified or deleted. They are the source of truth for com
 | `POST` | `/api/membership/payments` | Record payment |
 | `GET` | `/api/membership/payments` | List payments |
 | `GET` | `/api/membership/payments/:id` | Get payment (masked by role) |
+| `PATCH` | `/api/membership/payments/:id/status` | Transition payment status |
+| `DELETE` | `/api/membership/payments/:id` | Soft-delete payment (anchors 7-year `retentionExpiresAt`) |
 
 ### 7.6 CMS — `/api/cms`
 
@@ -585,8 +590,11 @@ Concrete request/response shapes for each endpoint group. Validation schemas are
 // Request
 { "lineId": "...", "shortageReason": "STOCKOUT", "quantityShort": 10 }
 
-// Success (200) — backorder line created
-{ "success": true, "data": { "backorderLine": { "id": "...", "lineType": "BACKORDER", "shortageReason": "STOCKOUT", "quantity": 10 } }, "meta": { "auditEventId": "..." } }
+// Success (201) — source line updated and backorder line created
+{ "success": true, "data": { "line": { "id": "...", "quantityShort": 10, "shortageReason": "STOCKOUT" }, "backorder": { "id": "...", "lineType": "BACKORDER", "shortageReason": "STOCKOUT", "quantity": 10 } }, "meta": { "auditEventId": "..." } }
+
+// Error (400) — quantityShort exceeds remaining quantity
+{ "success": false, "error": { "code": "VALIDATION_FAILED", "message": "quantityShort (...) cannot exceed remaining line quantity (...)" }, "meta": { ... } }
 ```
 
 **PATCH /api/outbound/orders/:id/approve-partial** (manager only)
@@ -902,7 +910,7 @@ All warehouse routes are under `/api/warehouse`. All require `Authorization: Bea
     "state": "CONFIRMED",
     "operationHistory": [
       { "id": "...", "actor": "user-id", "priorState": "", "newState": "PENDING", "reason": "Created", "timestamp": "..." },
-      { "id": "...", "actor": "user-id", "priorState": "PENDING", "newState": "CONFIRMED", "reason": null, "timestamp": "..." }
+      { "id": "...", "actor": "user-id", "priorState": "PENDING", "newState": "CONFIRMED", "reason": "Dock confirmed", "timestamp": "..." }
     ]
   }
 }
@@ -910,7 +918,7 @@ All warehouse routes are under `/api/warehouse`. All require `Authorization: Bea
 
 **POST /api/warehouse/appointments/:appointmentId/confirm** — roles: WAREHOUSE_OPERATOR, WAREHOUSE_MANAGER, SYSTEM_ADMIN
 ```json
-// Request (optional)
+// Request (required reason)
 { "reason": "Dock confirmed with carrier" }
 
 // Success (200) — returns updated appointment with history
@@ -1061,6 +1069,18 @@ Required header: `Idempotency-Key: <uuid>`
 ```
 
 ### POST /api/outbound/orders/:orderId/handoff — Handoff to carrier
+**409 INVALID_TRANSITION (order not yet packed):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "INVALID_TRANSITION",
+    "message": "Order must be PACKED before handoff (...)"
+  },
+  "meta": { "requestId": "...", "timestamp": "..." }
+}
+```
+
 **422 APPROVAL_REQUIRED (shortage without manager approval):**
 ```json
 {
@@ -1103,6 +1123,12 @@ Roles: WAREHOUSE_OPERATOR, WAREHOUSE_MANAGER, STRATEGY_MANAGER, SYSTEM_ADMIN
 ```json
 { "facilityId": "fac-cuid", "rulesetIds": ["rs-cuid-1", "rs-cuid-2"], "windowDays": 30 }
 ```
+
+`windowDays` is fixed to `30` by contract. Any non-30 value is rejected with `400 VALIDATION_FAILED`.
+Note: member read endpoints are limited to MEMBERSHIP_MANAGER and SYSTEM_ADMIN.
+`POST /api/admin/key-versions/rotate` — manual rotation trigger:
+
+Automatic enforcement: app startup wires a local scheduler that runs key-rotation passes on a configurable interval (`KEY_ROTATION_CHECK_INTERVAL_MS`, default 24h). When the active key version is overdue, the scheduler rotates to the next version automatically.
 
 **200 Success:**
 ```json
@@ -1167,7 +1193,7 @@ Roles: MEMBERSHIP_MANAGER, SYSTEM_ADMIN
 }
 ```
 
-Note: MEMBERSHIP_MANAGER sees masked fields; SYSTEM_ADMIN sees unmasked.
+Note: member read endpoints are limited to MEMBERSHIP_MANAGER and SYSTEM_ADMIN.
 
 ### POST /api/membership/payments — Record payment
 Roles: BILLING_MANAGER, MEMBERSHIP_MANAGER, SYSTEM_ADMIN
@@ -1197,17 +1223,40 @@ Roles: BILLING_MANAGER, MEMBERSHIP_MANAGER, SYSTEM_ADMIN
     "status": "RECORDED",
     "last4": null,
     "paidAt": "2026-04-16T12:00:00.000Z",
-    "retentionExpiresAt": "2033-04-16T12:00:00.000Z"
+    "deletedAt": null,
+    "retentionExpiresAt": null
   },
   "meta": { "requestId": "...", "timestamp": "..." }
 }
 ```
 
-Note: `last4` is `null` for MEMBERSHIP_MANAGER; BILLING_MANAGER and SYSTEM_ADMIN see the unmasked value.
+Note: `last4` is `null` for MEMBERSHIP_MANAGER; BILLING_MANAGER and SYSTEM_ADMIN see the unmasked value. `retentionExpiresAt` is `null` while the record is active; it is populated only when the payment is soft-deleted (see `DELETE` below).
 
 ### GET /api/membership/payments/:paymentId — Get payment (role-aware masking)
 - **BILLING_MANAGER / SYSTEM_ADMIN**: `last4` = `"4242"` (decrypted)
 - **MEMBERSHIP_MANAGER**: `last4` = `null` (masked)
+- Soft-deleted payments return 404.
+
+### DELETE /api/membership/payments/:paymentId — Soft-delete payment
+Roles: BILLING_MANAGER, MEMBERSHIP_MANAGER, SYSTEM_ADMIN
+
+Soft-deletes the payment and anchors the 7-year billing retention clock:
+`deletedAt = now`, `retentionExpiresAt = deletedAt + 7 years`. The record stops
+appearing in read endpoints and becomes eligible for hard-purge by
+`POST /api/admin/retention/purge-billing` once `retentionExpiresAt < now`.
+
+**200 Success:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "pay-cuid",
+    "deletedAt": "2026-04-18T12:00:00.000Z",
+    "retentionExpiresAt": "2033-04-18T12:00:00.000Z"
+  },
+  "meta": { "requestId": "...", "timestamp": "..." }
+}
+```
 
 ---
 
@@ -1318,6 +1367,8 @@ Roles: CMS_REVIEWER, SYSTEM_ADMIN.
 
 ### GET /api/cms/tags/trending?windowDays=7&limit=10
 Any authenticated user.
+
+`windowDays` is fixed to `7` by contract. Any non-7 value is rejected with `400 VALIDATION_FAILED`.
 
 **200 Success:**
 ```json
@@ -1460,7 +1511,7 @@ Returns counts of records eligible for purge in each domain.
     "billing": {
       "eligibleForPurge": 3,
       "retentionYears": 7,
-      "policy": "Hard delete soft-deleted PaymentRecord rows where retentionExpiresAt < now"
+      "policy": "Hard delete soft-deleted PaymentRecord rows whose retentionExpiresAt is in the past (deletedAt + 7y anchor)"
     },
     "operational": {
       "cutoffDate": "2024-04-17T12:00:00.000Z",
@@ -1477,8 +1528,9 @@ Returns counts of records eligible for purge in each domain.
 ---
 
 ### POST /api/admin/retention/purge-billing
-Hard-deletes soft-deleted PaymentRecord rows past their 7-year retention expiry.
-Body: `{ "confirm": true }`.
+Hard-deletes soft-deleted `PaymentRecord` rows whose `retentionExpiresAt` is in the past.
+The 7-year retention clock is anchored at soft-delete time (see `DELETE /api/membership/payments/:id`); active records (no `deletedAt`) are never eligible.
+Body: `{ "confirm": true }` — enforced both at the schema layer and at the service layer; omitting or setting `confirm: false` returns `VALIDATION_FAILED` and writes no data.
 
 **200 Success:**
 ```json
@@ -1492,8 +1544,8 @@ Body: `{ "confirm": true }`.
 ---
 
 ### POST /api/admin/retention/purge-operational
-Hard-deletes AuditEvent and AppointmentOperationHistory rows older than 2 years.
-Body: `{ "confirm": true }`.
+Hard-deletes `AuditEvent` and `AppointmentOperationHistory` rows older than 2 years.
+Body: `{ "confirm": true }` — enforced at both schema and service layers.
 
 **200 Success:**
 ```json
@@ -1520,9 +1572,9 @@ Body: `{ "confirm": true }`.
   "success": true,
   "data": {
     "id": "param-cuid-1",
-    "key": "cms.trending.windowDays",
-    "value": "14",
-    "description": "Trending tags calculation window in days",
+    "key": "cms.featured.limit",
+    "value": "12",
+    "description": "Featured article cap for CMS homepage",
     "updatedBy": "user-cuid-1",
     "createdAt": "2026-04-17T12:00:00.000Z",
     "updatedAt": "2026-04-17T12:00:00.000Z"
@@ -1544,7 +1596,7 @@ Body: `{ "confirm": true }`.
 ```json
 {
   "success": false,
-  "error": { "code": "CONFLICT", "message": "Parameter 'cms.trending.windowDays' already exists" },
+  "error": { "code": "CONFLICT", "message": "Parameter 'cms.featured.limit' already exists" },
   "meta": { "requestId": "...", "timestamp": "..." }
 }
 ```

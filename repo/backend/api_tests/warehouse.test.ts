@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { FastifyInstance } from 'fastify';
+import { seedUserWithSession, authHeader } from './_helpers.js';
 
 // ---- DB-DEPENDENCY NOTE ----
 // Tests in "Unauthenticated access", "Validation failures", and "Error envelope shape"
@@ -122,7 +123,7 @@ describe('Warehouse routes — validation failures', () => {
       headers: { Authorization: fakeAuthHeader },
       payload: { code: 'WH-001' }, // missing name
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body.success).toBe(false);
   });
@@ -134,7 +135,7 @@ describe('Warehouse routes — validation failures', () => {
       headers: { Authorization: fakeAuthHeader },
       payload: { name: 'Main Warehouse' }, // missing code
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body.success).toBe(false);
   });
@@ -146,7 +147,7 @@ describe('Warehouse routes — validation failures', () => {
       headers: { Authorization: fakeAuthHeader },
       payload: { facilityId: 'fac1', code: 'LOC-001', capacityCuFt: 0 },
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body.success).toBe(false);
   });
@@ -158,7 +159,7 @@ describe('Warehouse routes — validation failures', () => {
       headers: { Authorization: fakeAuthHeader },
       payload: { facilityId: 'fac1', code: 'LOC-001' }, // missing capacityCuFt
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body.success).toBe(false);
   });
@@ -170,7 +171,7 @@ describe('Warehouse routes — validation failures', () => {
       headers: { Authorization: fakeAuthHeader },
       payload: { facilityId: 'fac1', code: 'LOC-001', capacityCuFt: 100, hazardClass: 'RADIOACTIVE' },
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body.success).toBe(false);
   });
@@ -182,7 +183,7 @@ describe('Warehouse routes — validation failures', () => {
       headers: { Authorization: fakeAuthHeader },
       payload: { code: 'SKU-001', name: 'Widget', unitVolumeCuFt: 1.0 }, // missing unitWeightLb
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body.success).toBe(false);
   });
@@ -194,7 +195,7 @@ describe('Warehouse routes — validation failures', () => {
       headers: { Authorization: fakeAuthHeader },
       payload: { code: 'SKU-001', name: 'Widget', unitWeightLb: 1.0, unitVolumeCuFt: 1.0, abcClass: 'D' },
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body.success).toBe(false);
   });
@@ -206,7 +207,7 @@ describe('Warehouse routes — validation failures', () => {
       headers: { Authorization: fakeAuthHeader },
       payload: { locationId: 'loc1', lotNumber: 'LOT-001' }, // missing skuId
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body.success).toBe(false);
   });
@@ -218,7 +219,7 @@ describe('Warehouse routes — validation failures', () => {
       headers: { Authorization: fakeAuthHeader },
       payload: { type: 'INBOUND', scheduledAt: new Date().toISOString() }, // missing facilityId
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body.success).toBe(false);
   });
@@ -230,7 +231,7 @@ describe('Warehouse routes — validation failures', () => {
       headers: { Authorization: fakeAuthHeader },
       payload: { facilityId: 'fac1', type: 'INVALID', scheduledAt: new Date().toISOString() },
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body.success).toBe(false);
   });
@@ -242,7 +243,7 @@ describe('Warehouse routes — validation failures', () => {
       headers: { Authorization: fakeAuthHeader },
       payload: { facilityId: 'fac1', type: 'INBOUND' }, // missing scheduledAt
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body.success).toBe(false);
   });
@@ -281,7 +282,7 @@ describe('Warehouse routes — error envelope shape', () => {
       headers: { Authorization: 'Bearer fake' },
       payload: { code: 'WH-001' }, // missing name
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(401);
     const body = JSON.parse(response.payload);
     expect(body).toHaveProperty('success', false);
     expect(body).toHaveProperty('error');
@@ -343,3 +344,82 @@ describe('Warehouse routes — RBAC enforcement (DB-dependent)', () => {
     expect(body.error.code).toBe('UNAUTHORIZED');
   });
 });
+
+describe('Warehouse routes — Authenticated validation failures (DB-dependent)', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    app = await buildApp({ config: TEST_CONFIG });
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it('POST /api/warehouse/facilities missing code returns 400 with manager auth', async () => {
+    const manager = await seedUserWithSession(app, ['WAREHOUSE_MANAGER']);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/warehouse/facilities',
+      headers: authHeader(manager.token),
+      payload: { name: 'Manager Facility Missing Code' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = JSON.parse(response.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('POST /api/warehouse/appointments missing scheduledAt returns 400 with operator auth', async () => {
+    const operator = await seedUserWithSession(app, ['WAREHOUSE_OPERATOR']);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/warehouse/appointments',
+      headers: authHeader(operator.token),
+      payload: { facilityId: 'fac1', type: 'INBOUND' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = JSON.parse(response.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('POST /api/warehouse/locations missing capacityCuFt returns 400 with manager auth', async () => {
+    const manager = await seedUserWithSession(app, ['WAREHOUSE_MANAGER']);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/warehouse/locations',
+      headers: authHeader(manager.token),
+      payload: { facilityId: 'fac-1', code: 'LOC-VAL-1' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = JSON.parse(response.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('POST /api/warehouse/skus invalid abcClass returns 400 with manager auth', async () => {
+    const manager = await seedUserWithSession(app, ['WAREHOUSE_MANAGER']);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/warehouse/skus',
+      headers: authHeader(manager.token),
+      payload: {
+        code: 'SKU-VAL-1',
+        name: 'Validation SKU',
+        unitWeightLb: 1,
+        unitVolumeCuFt: 1,
+        abcClass: 'D',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = JSON.parse(response.payload);
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+  });
+});
+

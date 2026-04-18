@@ -160,6 +160,8 @@ describe('Admin depth — backup/restore and IP allowlist enforcement', () => {
       remoteAddress: '127.0.0.1',
     });
     expect(createParam.statusCode).toBe(201);
+    const createdParamBody = JSON.parse(createParam.payload);
+    const createdParamId = createdParamBody.data.id as string;
 
     const getParam = await app.inject({
       method: 'GET',
@@ -196,6 +198,27 @@ describe('Admin depth — backup/restore and IP allowlist enforcement', () => {
     });
     expect(getDeleted.statusCode).toBe(404);
     expect(JSON.parse(getDeleted.payload).error.code).toBe('NOT_FOUND');
+
+    const recreateParam = await app.inject({
+      method: 'POST',
+      url: '/api/admin/parameters',
+      headers: authHeader(admin.token),
+      payload: { key, value: 'v3', description: 'restored in depth test' },
+      remoteAddress: '127.0.0.1',
+    });
+    expect(recreateParam.statusCode).toBe(201);
+    const recreatedBody = JSON.parse(recreateParam.payload);
+    expect(recreatedBody.data.id).toBe(createdParamId);
+    expect(recreatedBody.data.value).toBe('v3');
+
+    const getRestored = await app.inject({
+      method: 'GET',
+      url: `/api/admin/parameters/${key}`,
+      headers: authHeader(admin.token),
+      remoteAddress: '127.0.0.1',
+    });
+    expect(getRestored.statusCode).toBe(200);
+    expect(JSON.parse(getRestored.payload).data.value).toBe('v3');
   });
 
   it('supports ip allowlist patch and delete by entry id', async () => {

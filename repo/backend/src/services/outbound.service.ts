@@ -2,10 +2,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { ErrorCode } from '../shared/envelope.js';
 import { calculateVariancePercent, computePackVerificationStatus } from '../shared/invariants.js';
+import { Role, type RoleType } from '../shared/enums.js';
 import { auditCreate, auditUpdate } from '../audit/audit.js';
 import {
   createOutboundOrder as repoCreateOrder,
   findOutboundOrderById,
+  findOutboundOrderByIdScoped,
   listOutboundOrders as repoListOrders,
   updateOutboundOrderStatus,
   findOutboundOrderLineById,
@@ -17,6 +19,7 @@ import {
   replaceExpiredIdempotencyRecord,
   createWave as repoCreateWave,
   findWaveById,
+  findWaveByIdScoped,
   listWaves as repoListWaves,
   updateWaveStatus,
   findPickTaskById,
@@ -28,11 +31,40 @@ import {
 import {
   findFacilityById,
   findSkuById,
-  findInventoryLotById,
 } from '../repositories/warehouse.repository.js';
 import {
   findInventoryLotsForSku,
 } from '../repositories/strategy.repository.js';
+
+export interface OutboundAccessPrincipal {
+  userId: string;
+  roles: RoleType[];
+}
+
+function hasElevatedOutboundAccess(roles: RoleType[]): boolean {
+  return roles.includes(Role.WAREHOUSE_MANAGER) || roles.includes(Role.SYSTEM_ADMIN);
+}
+
+function creatorScopeForPrincipal(principal: OutboundAccessPrincipal): { createdBy?: string } {
+  return hasElevatedOutboundAccess(principal.roles) ? {} : { createdBy: principal.userId };
+}
+
+function canAccessTask(principal: OutboundAccessPrincipal, task: { order: { createdBy: string } | null; assignedTo: string | null }): boolean {
+  if (hasElevatedOutboundAccess(principal.roles)) return true;
+  return task.order?.createdBy === principal.userId || task.assignedTo === principal.userId;
+}
+
+async function findScopedOrder(
+  prisma: PrismaClient,
+  orderId: string,
+  principal: OutboundAccessPrincipal,
+) {
+  const scope = creatorScopeForPrincipal(principal);
+  if (scope.createdBy) {
+    return findOutboundOrderByIdScoped(prisma, orderId, scope);
+  }
+  return findOutboundOrderById(prisma, orderId);
+}
 
 export class OutboundServiceError extends Error {
   constructor(
@@ -70,8 +102,12 @@ export async function createOutboundOrder(
   return order;
 }
 
-export async function getOutboundOrder(prisma: PrismaClient, orderId: string) {
-  const order = await findOutboundOrderById(prisma, orderId);
+export async function getOutboundOrder(
+  prisma: PrismaClient,
+  orderId: string,
+  principal: OutboundAccessPrincipal,
+) {
+  const order = await findScopedOrder(prisma, orderId, principal);
   if (!order) throw new OutboundServiceError(ErrorCode.NOT_FOUND, 'Order not found');
   return order;
 }
@@ -79,8 +115,12 @@ export async function getOutboundOrder(prisma: PrismaClient, orderId: string) {
 export async function listOutboundOrders(
   prisma: PrismaClient,
   opts: { facilityId?: string; status?: string } = {},
+  principal: OutboundAccessPrincipal,
 ) {
-  return repoListOrders(prisma, opts);
+  return repoListOrders(prisma, {
+    ...opts,
+    ...creatorScopeForPrincipal(principal),
+  });
 }
 
 // ---- Wave generation with 24-hour idempotency ----
@@ -90,6 +130,7 @@ export async function generateWave(
   idempotencyKey: string,
   data: { facilityId: string; orderIds: string[] },
   actorId: string,
+  principal: OutboundAccessPrincipal,
 ) {
   const now = new Date();
   const requestHash = createHash('sha256').update(JSON.stringify(data)).digest('hex');
@@ -121,7 +162,7 @@ export async function generateWave(
   // Validate orders
   const orders = [];
   for (const orderId of data.orderIds) {
-    const order = await findOutboundOrderById(prisma, orderId);
+    const order = await findScopedOrder(prisma, orderId, principal);
     if (!order) throw new OutboundServiceError(ErrorCode.NOT_FOUND, `Order not found: ${orderId}`);
     if (order.status !== 'DRAFT') {
       throw new OutboundServiceError(ErrorCode.CONFLICT, `Order ${orderId} is not in DRAFT status`);
@@ -176,21 +217,10 @@ export async function generateWave(
       return fallbackLocationId;
     }
 
-    const created = await prisma.location.create({
-      data: {
-        id: randomUUID(),
-        facilityId: data.facilityId,
-        code: `AUTO-STAGING-${randomUUID().slice(0, 8).toUpperCase()}`,
-        type: 'STAGING',
-        capacityCuFt: 1000,
-        hazardClass: 'NONE',
-        temperatureBand: 'AMBIENT',
-        isPickFace: false,
-        isActive: true,
-      },
-    });
-    fallbackLocationId = created.id;
-    return fallbackLocationId;
+    throw new OutboundServiceError(
+      ErrorCode.CONFLICT,
+      'No active location available in facility for shortage-task fallback. Create one before wave generation.',
+    );
   };
 
   let sequence = 1;
@@ -240,8 +270,15 @@ export async function generateWave(
   return { fromCache: false, wave };
 }
 
-export async function getWave(prisma: PrismaClient, waveId: string) {
-  const wave = await findWaveById(prisma, waveId);
+export async function getWave(
+  prisma: PrismaClient,
+  waveId: string,
+  principal: OutboundAccessPrincipal,
+) {
+  const scope = creatorScopeForPrincipal(principal);
+  const wave = scope.createdBy
+    ? await findWaveByIdScoped(prisma, waveId, scope)
+    : await findWaveById(prisma, waveId);
   if (!wave) throw new OutboundServiceError(ErrorCode.NOT_FOUND, 'Wave not found');
   return wave;
 }
@@ -249,8 +286,12 @@ export async function getWave(prisma: PrismaClient, waveId: string) {
 export async function listWaves(
   prisma: PrismaClient,
   opts: { facilityId?: string; status?: string } = {},
+  principal: OutboundAccessPrincipal,
 ) {
-  return repoListWaves(prisma, opts);
+  return repoListWaves(prisma, {
+    ...opts,
+    ...creatorScopeForPrincipal(principal),
+  });
 }
 
 export async function cancelWave(prisma: PrismaClient, waveId: string, actorId: string) {
@@ -267,9 +308,15 @@ export async function cancelWave(prisma: PrismaClient, waveId: string, actorId: 
 
 // ---- Pick task lifecycle ----
 
-export async function getPickTask(prisma: PrismaClient, taskId: string) {
+export async function getPickTask(
+  prisma: PrismaClient,
+  taskId: string,
+  principal: OutboundAccessPrincipal,
+) {
   const task = await findPickTaskById(prisma, taskId);
-  if (!task) throw new OutboundServiceError(ErrorCode.NOT_FOUND, 'Pick task not found');
+  if (!task || !canAccessTask(principal, task)) {
+    throw new OutboundServiceError(ErrorCode.NOT_FOUND, 'Pick task not found');
+  }
   return task;
 }
 
@@ -278,13 +325,24 @@ export async function updatePickTask(
   taskId: string,
   data: { status?: string; quantityPicked?: number; actualDistance?: number },
   actorId: string,
+  principal: OutboundAccessPrincipal,
 ) {
   const task = await findPickTaskById(prisma, taskId);
-  if (!task) throw new OutboundServiceError(ErrorCode.NOT_FOUND, 'Pick task not found');
+  if (!task || !canAccessTask(principal, task)) {
+    throw new OutboundServiceError(ErrorCode.NOT_FOUND, 'Pick task not found');
+  }
+
+  if (data.quantityPicked !== undefined && data.quantityPicked > task.quantity) {
+    throw new OutboundServiceError(
+      ErrorCode.VALIDATION_FAILED,
+      `quantityPicked (${data.quantityPicked}) cannot exceed task quantity (${task.quantity})`,
+    );
+  }
 
   const before = { status: task.status, quantityPicked: task.quantityPicked };
   const now = new Date();
   const updateData: Record<string, unknown> = { ...data };
+  const pickedQty = data.quantityPicked ?? task.quantityPicked;
 
   // Status transitions
   if (data.status) {
@@ -303,42 +361,101 @@ export async function updatePickTask(
     }
   }
 
-  await repoUpdatePickTask(prisma, taskId, updateData as Parameters<typeof repoUpdatePickTask>[2]);
-
-  // Post-transition effects
-  const pickedQty = data.quantityPicked ?? task.quantityPicked;
-  if (data.status === 'COMPLETED') {
-    await updateOrderLine(prisma, task.orderLineId, { quantityFulfilled: pickedQty });
+  // Pre-flight SHORT validation runs before the transaction so the caller
+  // gets VALIDATION_FAILED without any DB state ever being mutated.
+  if (data.status === 'SHORT' && task.quantity - pickedQty <= 0) {
+    throw new OutboundServiceError(
+      ErrorCode.VALIDATION_FAILED,
+      'SHORT status requires quantityPicked lower than task quantity',
+    );
   }
 
-  if (data.status === 'SHORT') {
-    const shortage = task.quantity - pickedQty;
-    if (shortage > 0) {
-      await updateOrderLine(prisma, task.orderLineId, {
+  return prisma.$transaction(async (tx) => {
+    const txClient = tx as unknown as PrismaClient;
+
+    await repoUpdatePickTask(txClient, taskId, updateData as Parameters<typeof repoUpdatePickTask>[2]);
+
+    // Post-transition effects
+    if (data.status === 'COMPLETED') {
+      const updatedLine = await updateOrderLine(txClient, task.orderLineId, {
+        quantityFulfilled: pickedQty,
+      });
+      await auditUpdate(
+        txClient,
+        actorId,
+        'OutboundOrderLine',
+        task.orderLineId,
+        { quantityFulfilled: task.orderLine.quantityFulfilled },
+        { quantityFulfilled: updatedLine.quantityFulfilled },
+        { reason: 'pick-task-completed', pickTaskId: taskId, waveId: task.waveId },
+      );
+    }
+
+    if (data.status === 'SHORT') {
+      const shortage = task.quantity - pickedQty;
+      // shortage > 0 is guaranteed by the pre-flight check above.
+      const updatedLine = await updateOrderLine(txClient, task.orderLineId, {
         quantityShort: shortage,
         shortageReason: 'STOCKOUT',
       });
-      await createBackorderLine(prisma, {
+      await auditUpdate(
+        txClient,
+        actorId,
+        'OutboundOrderLine',
+        task.orderLineId,
+        {
+          quantityShort: task.orderLine.quantityShort,
+          shortageReason: task.orderLine.shortageReason,
+        },
+        {
+          quantityShort: updatedLine.quantityShort,
+          shortageReason: updatedLine.shortageReason,
+        },
+        { reason: 'pick-task-shortage', pickTaskId: taskId, waveId: task.waveId },
+      );
+      const backorder = await createBackorderLine(txClient, {
         orderId: task.orderId,
         skuId: task.skuId,
         quantity: shortage,
         sourceLineId: task.orderLineId,
         shortageReason: 'STOCKOUT',
       });
+      await auditCreate(
+        txClient,
+        actorId,
+        'OutboundOrderLine',
+        backorder.id,
+        backorder,
+        {
+          reason: 'pick-task-shortage-backorder',
+          pickTaskId: taskId,
+          waveId: task.waveId,
+          sourceLineId: task.orderLineId,
+        },
+      );
     }
-  }
 
-  // Check if entire wave is complete
-  const allTasks = await listPickTasksByWave(prisma, task.waveId);
-  const terminal = ['COMPLETED', 'SHORT', 'CANCELLED'];
-  const allDone = allTasks.every((t) => terminal.includes(t.id === taskId ? (data.status ?? t.status) : t.status));
-  if (allDone) {
-    await updateWaveStatus(prisma, task.waveId, 'COMPLETED');
-  }
+    // Check if entire wave is complete
+    const allTasks = await listPickTasksByWave(txClient, task.waveId);
+    const terminal = ['COMPLETED', 'SHORT', 'CANCELLED'];
+    const allDone = allTasks.every((t) => terminal.includes(t.id === taskId ? (data.status ?? t.status) : t.status));
+    if (allDone && task.wave.status !== 'COMPLETED') {
+      await updateWaveStatus(txClient, task.waveId, 'COMPLETED');
+      await auditUpdate(
+        txClient,
+        actorId,
+        'Wave',
+        task.waveId,
+        { status: task.wave.status },
+        { status: 'COMPLETED' },
+        { reason: 'all-pick-tasks-terminal' },
+      );
+    }
 
-  const after = await findPickTaskById(prisma, taskId);
-  await auditUpdate(prisma, actorId, 'PickTask', taskId, before, { status: after?.status, quantityPicked: after?.quantityPicked });
-  return after;
+    const after = await findPickTaskById(txClient, taskId);
+    await auditUpdate(txClient, actorId, 'PickTask', taskId, before, { status: after?.status, quantityPicked: after?.quantityPicked });
+    return after;
+  });
 }
 
 // ---- Pack verification ----
@@ -348,8 +465,9 @@ export async function verifyPack(
   orderId: string,
   data: { actualWeightLb: number; actualVolumeCuFt: number },
   actorId: string,
+  principal: OutboundAccessPrincipal,
 ) {
-  const order = await findOutboundOrderById(prisma, orderId);
+  const order = await findScopedOrder(prisma, orderId, principal);
   if (!order) throw new OutboundServiceError(ErrorCode.NOT_FOUND, 'Order not found');
 
   // Compute expected totals from order lines
@@ -395,7 +513,17 @@ export async function verifyPack(
     throw new OutboundServiceError(ErrorCode.VARIANCE_EXCEEDED, rejectionReason!);
   }
 
+  const before = { status: order.status };
   await updateOutboundOrderStatus(prisma, orderId, 'PACKED');
+  await auditUpdate(
+    prisma,
+    actorId,
+    'OutboundOrder',
+    orderId,
+    before,
+    { status: 'PACKED' },
+    { reason: 'pack-verification-passed', packVerificationId: verification.id },
+  );
   return verification;
 }
 
@@ -406,13 +534,28 @@ export async function reportException(
   orderId: string,
   data: { lineId: string; shortageReason: string; quantityShort: number; notes?: string },
   actorId: string,
+  principal: OutboundAccessPrincipal,
 ) {
-  const order = await findOutboundOrderById(prisma, orderId);
+  const order = await findScopedOrder(prisma, orderId, principal);
   if (!order) throw new OutboundServiceError(ErrorCode.NOT_FOUND, 'Order not found');
 
   const line = await findOutboundOrderLineById(prisma, data.lineId);
   if (!line || line.order.id !== orderId) {
     throw new OutboundServiceError(ErrorCode.NOT_FOUND, 'Order line not found on this order');
+  }
+  if (line.lineType !== 'STANDARD') {
+    throw new OutboundServiceError(
+      ErrorCode.CONFLICT,
+      'Shortage exceptions can only be reported on STANDARD order lines',
+    );
+  }
+
+  const remaining = Math.max(line.quantity - line.quantityFulfilled, 0);
+  if (data.quantityShort > remaining) {
+    throw new OutboundServiceError(
+      ErrorCode.VALIDATION_FAILED,
+      `quantityShort (${data.quantityShort}) cannot exceed remaining line quantity (${remaining})`,
+    );
   }
 
   const before = { quantityShort: line.quantityShort, shortageReason: line.shortageReason };
@@ -445,9 +588,25 @@ export async function recordHandoff(
   orderId: string,
   data: { carrier: string; trackingNumber?: string; notes?: string },
   actorId: string,
+  principal: OutboundAccessPrincipal,
 ) {
-  const order = await findOutboundOrderById(prisma, orderId);
+  const order = await findScopedOrder(prisma, orderId, principal);
   if (!order) throw new OutboundServiceError(ErrorCode.NOT_FOUND, 'Order not found');
+
+  if (order.status !== 'PACKED') {
+    throw new OutboundServiceError(
+      ErrorCode.INVALID_TRANSITION,
+      `Order must be PACKED before handoff (current status: ${order.status})`,
+    );
+  }
+
+  const latestPackVerification = order.packVerifications[0];
+  if (!latestPackVerification || latestPackVerification.status !== 'PASSED') {
+    throw new OutboundServiceError(
+      ErrorCode.CONFLICT,
+      'Latest pack verification must be PASSED before handoff',
+    );
+  }
 
   const hasShortage = order.lines.some((l) => l.quantityShort > 0);
   if (hasShortage && !order.approvedForPartialShip) {

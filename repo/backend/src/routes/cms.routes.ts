@@ -63,7 +63,7 @@ interface BulkMigrateTagsBody { fromTagId: string; toTagId: string; articleIds?:
 interface RecordInteractionBody { type: string; sessionId?: string }
 interface ListArticlesQuery { state?: string; authorId?: string }
 interface ListTagsQuery { includeTombstones?: boolean }
-interface TrendingTagsQuery { windowDays?: number; limit?: number }
+interface TrendingTagsQuery { windowDays?: 7; limit?: number }
 
 // ---- Error Handler ----
 
@@ -355,7 +355,6 @@ export const cmsRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const trending = await getTrendingTags(
         fastify.prisma,
-        request.query.windowDays ?? 7,
         request.query.limit ?? 20,
       );
       return reply.status(200).send(successResponse(trending, request.id));

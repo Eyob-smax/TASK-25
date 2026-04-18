@@ -8,6 +8,7 @@ export async function createMember(
   data: {
     memberNumber: string;      // encrypted value
     memberNumberHash: string;  // deterministic lookup hash of plaintext memberNumber
+    createdBy?: string;
     firstName: string;
     lastName: string;
     email?: string;       // encrypted value
@@ -20,6 +21,7 @@ export async function createMember(
       id: randomUUID(),
       memberNumber: data.memberNumber,
       memberNumberHash: data.memberNumberHash,
+      createdBy: data.createdBy ?? null,
       firstName: data.firstName,
       lastName: data.lastName,
       email: data.email ?? null,
@@ -38,9 +40,17 @@ export async function findMemberByNumberHash(prisma: PrismaClient, memberNumberH
   return prisma.member.findUnique({ where: { memberNumberHash } });
 }
 
-export async function findMemberById(prisma: PrismaClient, id: string) {
+export async function findMemberById(
+  prisma: PrismaClient,
+  id: string,
+  opts: { createdBy?: string } = {},
+) {
   return prisma.member.findFirst({
-    where: { id, deletedAt: null },
+    where: {
+      id,
+      deletedAt: null,
+      ...(opts.createdBy ? { createdBy: opts.createdBy } : {}),
+    },
     include: {
       enrollments: { include: { package: true } },
     },
@@ -49,11 +59,12 @@ export async function findMemberById(prisma: PrismaClient, id: string) {
 
 export async function listMembers(
   prisma: PrismaClient,
-  opts: { includeInactive?: boolean } = {},
+  opts: { includeInactive?: boolean; createdBy?: string } = {},
 ) {
   return prisma.member.findMany({
     where: {
       deletedAt: null,
+      ...(opts.createdBy ? { createdBy: opts.createdBy } : {}),
       ...(opts.includeInactive ? {} : { isActive: true }),
     },
     orderBy: { createdAt: 'desc' },
@@ -263,4 +274,16 @@ export async function countPaymentsCreatedToday(prisma: PrismaClient, date: Date
 
 export async function updatePaymentStatus(prisma: PrismaClient, id: string, status: string) {
   return prisma.paymentRecord.update({ where: { id }, data: { status } });
+}
+
+export async function softDeletePayment(
+  prisma: PrismaClient,
+  id: string,
+  deletedAt: Date,
+  retentionExpiresAt: Date,
+) {
+  return prisma.paymentRecord.update({
+    where: { id },
+    data: { deletedAt, retentionExpiresAt },
+  });
 }

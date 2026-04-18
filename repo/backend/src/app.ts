@@ -13,7 +13,9 @@ import { cmsRoutes } from './routes/cms.routes.js';
 import { adminRoutes } from './routes/admin.routes.js';
 import { startAppointmentExpireScheduler } from './services/appointment.scheduler.js';
 import { startCmsPublishScheduler } from './services/cms.scheduler.js';
+import { startKeyRotationScheduler } from './services/keyrotation.scheduler.js';
 import { createDomainLogger } from './logging/logger.js';
+import { parseMasterKey } from './security/encryption.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -107,11 +109,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         errorResponse(ErrorCode.NOT_FOUND, err.message || 'Not found', request.id),
       );
     }
-    request.log.error({ err: error }, 'unhandled error');
-    return reply.status(err.statusCode ?? 500).send(
+    const statusCode = err.statusCode ?? 500;
+    request.log.error({ err: error, statusCode }, 'unhandled error');
+    const safeMessage = statusCode >= 500 ? 'Internal server error' : (err.message || 'Request failed');
+    return reply.status(statusCode).send(
       errorResponse(
         ErrorCode.INTERNAL_ERROR,
-        err.message || 'Internal server error',
+        safeMessage,
         request.id,
       ),
     );
@@ -150,9 +154,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       app.prisma,
       createDomainLogger(app.log, 'cms'),
     );
+    const keyRotationTimer = config.keyRotationSchedulerEnabled
+      ? startKeyRotationScheduler(
+          app.prisma,
+          createDomainLogger(app.log, 'admin'),
+          parseMasterKey(config.encryptionMasterKey),
+          config.keyRotationCheckIntervalMs ?? 86_400_000,
+        )
+      : null;
     app.addHook('onClose', async () => {
       clearInterval(appointmentTimer);
       clearInterval(cmsTimer);
+      if (keyRotationTimer) clearInterval(keyRotationTimer);
     });
   });
 

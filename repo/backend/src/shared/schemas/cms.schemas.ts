@@ -141,7 +141,7 @@ export const listTagsQuerySchema = {
 export const trendingTagsQuerySchema = {
   type: 'object',
   properties: {
-    windowDays: { type: 'integer', minimum: 1, maximum: 90, default: 7 },
+    windowDays: { type: 'integer', enum: [7], default: 7 },
     limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
   },
   additionalProperties: false,

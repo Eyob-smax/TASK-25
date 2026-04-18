@@ -115,21 +115,33 @@ export async function reassignArticleTagsFromTo(
   fromTagId: string,
   toTagId: string,
 ) {
-  // Find all article tags for fromTag
-  const sourceTags = await prisma.articleTag.findMany({ where: { tagId: fromTagId } });
+  // Find all active article tags for source tag.
+  const sourceTags = await prisma.articleTag.findMany({
+    where: { tagId: fromTagId, isActive: true, deletedAt: null },
+  });
   for (const at of sourceTags) {
-    // Check if target already has this article tagged
+    // If a target link already exists, retire the source link.
     const existing = await prisma.articleTag.findFirst({
-      where: { articleId: at.articleId, tagId: toTagId },
+      where: {
+        articleId: at.articleId,
+        tagId: toTagId,
+        isActive: true,
+        deletedAt: null,
+      },
     });
-    if (!existing) {
-      // Move: create new ArticleTag with target
-      await prisma.articleTag.create({
-        data: { id: randomUUID(), articleId: at.articleId, tagId: toTagId },
+    if (existing) {
+      await prisma.articleTag.update({
+        where: { id: at.id },
+        data: { isActive: false, deletedAt: new Date(), deletedBy: 'SYSTEM' },
       });
+      continue;
     }
-    // Delete source article tag
-    await prisma.articleTag.delete({ where: { id: at.id } });
+
+    // Repoint in-place to avoid destructive row deletion.
+    await prisma.articleTag.update({
+      where: { id: at.id },
+      data: { tagId: toTagId },
+    });
   }
 }
 
@@ -139,11 +151,26 @@ export async function reassignArticleTagForOneArticle(
   fromTagId: string,
   toTagId: string,
 ) {
-  const existing = await prisma.articleTag.findFirst({ where: { articleId, tagId: toTagId } });
-  if (!existing) {
-    await prisma.articleTag.create({ data: { id: randomUUID(), articleId, tagId: toTagId } });
+  const existingTarget = await prisma.articleTag.findFirst({
+    where: { articleId, tagId: toTagId, isActive: true, deletedAt: null },
+  });
+  const sourceRows = await prisma.articleTag.findMany({
+    where: { articleId, tagId: fromTagId, isActive: true, deletedAt: null },
+  });
+
+  if (existingTarget) {
+    for (const row of sourceRows) {
+      await prisma.articleTag.update({
+        where: { id: row.id },
+        data: { isActive: false, deletedAt: new Date(), deletedBy: 'SYSTEM' },
+      });
+    }
+    return;
   }
-  await prisma.articleTag.deleteMany({ where: { articleId, tagId: fromTagId } });
+
+  for (const row of sourceRows) {
+    await prisma.articleTag.update({ where: { id: row.id }, data: { tagId: toTagId } });
+  }
 }
 
 export async function reassignTagAliasesFromTo(
@@ -179,8 +206,11 @@ export async function findArticleById(prisma: PrismaClient, id: string) {
     include: {
       author: true,
       reviewer: true,
-      tags: { include: { tag: { include: { aliases: true } } } },
-      categories: { include: { category: true } },
+      tags: {
+        where: { isActive: true, deletedAt: null },
+        include: { tag: { include: { aliases: true } } },
+      },
+      categories: { where: { isActive: true, deletedAt: null }, include: { category: true } },
     },
   });
 }
@@ -199,7 +229,10 @@ export async function listArticles(
       ...(opts.state ? { state: opts.state } : {}),
       ...(opts.authorId ? { authorId: opts.authorId } : {}),
     },
-    include: { author: true, tags: { include: { tag: true } } },
+    include: {
+      author: true,
+      tags: { where: { isActive: true, deletedAt: null }, include: { tag: true } },
+    },
     orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }],
   });
 }
@@ -231,10 +264,24 @@ export async function replaceArticleTags(
   articleId: string,
   tagIds: string[],
 ) {
-  await prisma.articleTag.deleteMany({ where: { articleId } });
-  if (tagIds.length > 0) {
-    await prisma.articleTag.createMany({
-      data: tagIds.map((tagId) => ({ id: randomUUID(), articleId, tagId })),
+  const desired = new Set(tagIds);
+  const now = new Date();
+
+  await prisma.articleTag.updateMany({
+    where: {
+      articleId,
+      isActive: true,
+      deletedAt: null,
+      ...(tagIds.length > 0 ? { tagId: { notIn: tagIds } } : {}),
+    },
+    data: { isActive: false, deletedAt: now, deletedBy: 'SYSTEM' },
+  });
+
+  for (const tagId of desired) {
+    await prisma.articleTag.upsert({
+      where: { articleId_tagId: { articleId, tagId } },
+      update: { isActive: true, deletedAt: null, deletedBy: null },
+      create: { id: randomUUID(), articleId, tagId, isActive: true },
     });
   }
 }
@@ -244,10 +291,24 @@ export async function replaceArticleCategories(
   articleId: string,
   categoryIds: string[],
 ) {
-  await prisma.articleCategory.deleteMany({ where: { articleId } });
-  if (categoryIds.length > 0) {
-    await prisma.articleCategory.createMany({
-      data: categoryIds.map((categoryId) => ({ id: randomUUID(), articleId, categoryId })),
+  const desired = new Set(categoryIds);
+  const now = new Date();
+
+  await prisma.articleCategory.updateMany({
+    where: {
+      articleId,
+      isActive: true,
+      deletedAt: null,
+      ...(categoryIds.length > 0 ? { categoryId: { notIn: categoryIds } } : {}),
+    },
+    data: { isActive: false, deletedAt: now, deletedBy: 'SYSTEM' },
+  });
+
+  for (const categoryId of desired) {
+    await prisma.articleCategory.upsert({
+      where: { articleId_categoryId: { articleId, categoryId } },
+      update: { isActive: true, deletedAt: null, deletedBy: null },
+      create: { id: randomUUID(), articleId, categoryId, isActive: true },
     });
   }
 }
@@ -289,7 +350,12 @@ export async function countInteractionsByTagInWindow(
     where: { createdAt: { gte: since } },
     include: {
       article: {
-        include: { tags: { include: { tag: true } } },
+        include: {
+          tags: {
+            where: { isActive: true, deletedAt: null },
+            include: { tag: true },
+          },
+        },
       },
     },
   });
@@ -314,7 +380,11 @@ export async function countInteractionsByTagInWindow(
 
 export async function countArticlesByTag(prisma: PrismaClient) {
   const articleTags = await prisma.articleTag.findMany({
-    where: { article: { state: 'PUBLISHED', deletedAt: null } },
+    where: {
+      isActive: true,
+      deletedAt: null,
+      article: { state: 'PUBLISHED', deletedAt: null },
+    },
     include: { tag: true },
   });
 

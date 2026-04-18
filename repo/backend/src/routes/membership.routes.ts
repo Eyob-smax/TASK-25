@@ -31,6 +31,7 @@ import {
   getPayment,
   listPayments,
   updatePaymentStatus,
+  softDeletePayment,
   MembershipServiceError,
 } from '../services/membership.service.js';
 
@@ -85,7 +86,7 @@ export const membershipRoutes: FastifyPluginAsync = async (fastify) => {
 
   const membershipRoles = [Role.MEMBERSHIP_MANAGER, Role.SYSTEM_ADMIN];
   const billingRoles = [Role.BILLING_MANAGER, Role.MEMBERSHIP_MANAGER, Role.SYSTEM_ADMIN];
-  const readMemberRoles = [Role.MEMBERSHIP_MANAGER, Role.BILLING_MANAGER, Role.SYSTEM_ADMIN];
+  const readMemberRoles = [Role.MEMBERSHIP_MANAGER, Role.SYSTEM_ADMIN];
 
   // ===== MEMBERS =====
 
@@ -97,7 +98,7 @@ export const membershipRoutes: FastifyPluginAsync = async (fastify) => {
       const members = await listMembers(
         fastify.prisma,
         { includeInactive: request.query.includeInactive ?? false },
-        request.principal!.roles,
+        request.principal!,
         masterKey,
       );
       return reply.status(200).send(successResponse(members, request.id));
@@ -134,7 +135,7 @@ export const membershipRoutes: FastifyPluginAsync = async (fastify) => {
         const member = await getMember(
           fastify.prisma,
           request.params.memberId,
-          request.principal!.roles,
+          request.principal!,
           masterKey,
         );
         return reply.status(200).send(successResponse(member, request.id));
@@ -155,6 +156,7 @@ export const membershipRoutes: FastifyPluginAsync = async (fastify) => {
           fastify.prisma,
           request.params.memberId,
           request.body,
+          request.principal!,
           request.principal!.userId,
           masterKey,
           keyVersion,
@@ -184,7 +186,11 @@ export const membershipRoutes: FastifyPluginAsync = async (fastify) => {
     { preHandler: [fastify.authenticate, fastify.requireRole(readMemberRoles)] },
     async (request, reply) => {
       try {
-        const enrollments = await listEnrollments(fastify.prisma, request.params.memberId);
+        const enrollments = await listEnrollments(
+          fastify.prisma,
+          request.params.memberId,
+          request.principal!,
+        );
         return reply.status(200).send(successResponse(enrollments, request.id));
       } catch (err) {
         return handleServiceError(err, request, reply);
@@ -205,6 +211,7 @@ export const membershipRoutes: FastifyPluginAsync = async (fastify) => {
             startDate: new Date(request.body.startDate),
             endDate: request.body.endDate ? new Date(request.body.endDate) : undefined,
           },
+          request.principal!,
           request.principal!.userId,
         );
         return reply.status(201).send(successResponse(enrollment, request.id));
@@ -341,6 +348,26 @@ export const membershipRoutes: FastifyPluginAsync = async (fastify) => {
           request.principal!.userId,
         );
         return reply.status(200).send(successResponse(payment, request.id));
+      } catch (err) {
+        return handleServiceError(err, request, reply);
+      }
+    },
+  );
+
+  // Soft-delete payment; anchors the 7-year billing retention clock
+  // (retentionExpiresAt = deletedAt + 7y). Records are hard-deleted by
+  // /api/admin/retention/purge-billing once retentionExpiresAt is in the past.
+  fastify.delete<{ Params: PaymentIdParams }>(
+    '/payments/:paymentId',
+    { preHandler: [fastify.authenticate, fastify.requireRole(billingRoles)] },
+    async (request, reply) => {
+      try {
+        const result = await softDeletePayment(
+          fastify.prisma,
+          request.params.paymentId,
+          request.principal!.userId,
+        );
+        return reply.status(200).send(successResponse(result, request.id));
       } catch (err) {
         return handleServiceError(err, request, reply);
       }

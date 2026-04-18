@@ -49,6 +49,9 @@ model UserRole {
   id         String   @id @default(cuid())
   userId     String
   role       String   // validated against Role enum in app layer
+  isActive   Boolean  @default(true)
+  deletedAt  DateTime?
+  deletedBy  String?
   assignedAt DateTime @default(now())
   assignedBy String   // userId of assigner or SYSTEM
 
@@ -56,6 +59,7 @@ model UserRole {
 
   @@unique([userId, role])
   @@index([userId])
+  @@index([userId, isActive])
 }
 
 /// Opaque server-managed session.
@@ -84,6 +88,8 @@ model IpAllowlistEntry {
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+  deletedBy   String?
 }
 
 /// Per-principal rate limiting bucket (sliding window).
@@ -136,6 +142,8 @@ model ParameterDictionaryEntry {
   updatedBy   String   // userId
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+  deletedBy   String?
 }
 
 /// Backup snapshot metadata for encrypted file snapshots.
@@ -481,6 +489,7 @@ model Member {
   id                   String    @id @default(cuid())
   memberNumber         String    @unique // encrypted at rest
   memberNumberHash     String?   @unique // HMAC-SHA-256 of plaintext for uniqueness lookups
+  createdBy            String?   // userId of creator for object-level scope
   firstName            String
   lastName             String
   email                String?   // encrypted at rest
@@ -493,6 +502,8 @@ model Member {
 
   enrollments MemberPackageEnrollment[]
   payments    PaymentRecord[]
+
+  @@index([createdBy, deletedAt])
 }
 
 /// Membership package definition.
@@ -648,6 +659,9 @@ model ArticleTag {
   id        String   @id @default(cuid())
   articleId String
   tagId     String
+  isActive  Boolean  @default(true)
+  deletedAt DateTime?
+  deletedBy String?
   createdAt DateTime @default(now())
 
   article Article @relation(fields: [articleId], references: [id])
@@ -661,6 +675,9 @@ model ArticleCategory {
   id         String   @id @default(cuid())
   articleId  String
   categoryId String
+  isActive   Boolean  @default(true)
+  deletedAt  DateTime?
+  deletedBy  String?
   createdAt  DateTime @default(now())
 
   article  Article  @relation(fields: [articleId], references: [id])

@@ -93,19 +93,14 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
   });
 
   // Auth-before-validation barrier: Fastify runs `validation` before
-  // `preHandler`, so requests missing Authorization can otherwise receive 400
-  // schema errors for protected endpoints. Treat all `/api/*` endpoints as
-  // protected except `/api/auth/login`.
+  // `preHandler`, so protected endpoints must reject unauthenticated callers
+  // here to avoid leaking schema hints through 400 validation responses.
+  // Treat all `/api/*` endpoints as protected except `/api/auth/login`.
   fastify.addHook('preValidation', async (request: FastifyRequest, reply: FastifyReply) => {
     const path = request.url.split('?', 1)[0] ?? request.url;
     const isProtectedApiPath = path.startsWith('/api/') && path !== '/api/auth/login';
-    const authHeader = request.headers.authorization;
-    const shouldShortCircuitAuth = !authHeader;
 
-    // Preserve legacy behavior for tests and handlers that pass a fake bearer
-    // token only to reach schema validation logic: short-circuit only when the
-    // Authorization header is missing entirely.
-    if (!request.principal && shouldShortCircuitAuth && isProtectedApiPath) {
+    if (!request.principal && isProtectedApiPath) {
       return reply
         .status(401)
         .send(errorResponse(ErrorCode.UNAUTHORIZED, 'Authentication required', request.id));

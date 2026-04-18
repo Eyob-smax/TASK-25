@@ -58,7 +58,8 @@ function handleServiceError(
 ) {
   if (err instanceof AdminServiceError) {
     const status = ErrorHttpStatus[err.code] ?? 500;
-    return reply.status(status).send(errorResponse(err.code, err.message, request.id));
+    const safeMessage = status >= 500 ? 'Internal server error' : err.message;
+    return reply.status(status).send(errorResponse(err.code, safeMessage, request.id));
   }
   throw err;
 }
@@ -160,6 +161,7 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
           backupDir,
           masterKey,
           request.principal!.userId,
+          request.body?.confirm === true,
         );
         backupLog.info(
           { snapshotId: request.params.snapshotId },
@@ -200,7 +202,11 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const retentionLog = createDomainLogger(request.log, 'retention');
       try {
-        const result = await purgeBillingRecords(fastify.prisma, request.principal!.userId);
+        const result = await purgeBillingRecords(
+          fastify.prisma,
+          request.principal!.userId,
+          request.body?.confirm === true,
+        );
         retentionLog.info(
           { actorId: request.principal!.userId, purged: result },
           'Billing retention purge executed',
@@ -222,7 +228,11 @@ export const adminRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const retentionLog = createDomainLogger(request.log, 'retention');
       try {
-        const result = await purgeOperationalLogs(fastify.prisma, request.principal!.userId);
+        const result = await purgeOperationalLogs(
+          fastify.prisma,
+          request.principal!.userId,
+          request.body?.confirm === true,
+        );
         retentionLog.info(
           { actorId: request.principal!.userId, purged: result },
           'Operational retention purge executed',

@@ -256,7 +256,7 @@ Role-aware field serialization in `src/security/masking.ts`:
 
 ### 7.5 Audit Trail (implemented Prompt 3)
 
-Append-only audit events written by `src/audit/audit.ts`. The Prisma schema has no `updatedAt` or `deletedAt` on `AuditEvent` — the table is structurally immutable.
+Append-only audit events written by `src/audit/audit.ts`. The Prisma schema has no `updatedAt` on `AuditEvent` (no in-place mutation), while retention operations can hard-delete rows older than the configured 2-year operational window.
 
 **Digest model:** `digestObject(value)` computes `SHA-256(JSON.stringify(value))`. Before and after state snapshots are digested, not stored in full, preventing audit table from leaking sensitive data while still supporting tamper-detection.
 
@@ -517,6 +517,7 @@ PENDING → IN_PROGRESS → COMPLETED
 - Transitioning to IN_PROGRESS: records `startedAt = now`.
 - Transitioning to COMPLETED: records `completedAt = now`, increments `orderLine.quantityFulfilled`.
 - Transitioning to SHORT: records `completedAt = now`, creates BACKORDER `OutboundOrderLine` with `sourceLineId` FK, sets `orderLine.quantityShort`.
+- Validation guardrails: `quantityPicked` cannot exceed task quantity; `SHORT` requires positive shortage (`quantityPicked < task.quantity`).
 - **Wave auto-completion:** after every pick task update, if all tasks in the wave are in terminal states (COMPLETED/SHORT/CANCELLED), the wave is transitioned to COMPLETED automatically.
 
 ### Pack Verification (±5% Tolerance)
@@ -528,7 +529,9 @@ PENDING → IN_PROGRESS → COMPLETED
 
 ### Shortage Exception → Backorder Conversion
 - `reportException` endpoint creates a BACKORDER line (`lineType='BACKORDER'`, `sourceLineId` FK to original line) and updates the source line's `quantityShort` + `shortageReason`.
+- Exception guardrail: `quantityShort` must not exceed remaining line quantity.
 - Also triggered automatically when a pick task transitions to SHORT.
+- Handoff gate: order must already be `PACKED` and latest pack verification status must be `PASSED`.
 - Manager approval gate: before handoff, if any line has `quantityShort > 0` and `order.approvedForPartialShip = false`, throws `APPROVAL_REQUIRED`. Requires WAREHOUSE_MANAGER or SYSTEM_ADMIN to call `PATCH /orders/:id/approve-partial`.
 
 ---
@@ -572,7 +575,7 @@ src/repositories/strategy.repository.ts — pure Prisma queries
 5. Return tasks with sequence and score fields.
 
 ### 30-Day Simulation
-- Loads all COMPLETED pick tasks within the specified window (default: last 30 days).
+- Loads all COMPLETED pick tasks from a fixed last-30-days horizon (`windowDays` is contract-locked to `30`).
 - For each ruleset in `rulesetIds`: re-scores historical tasks, sorts by score, computes:
   - `totalTouches`: number of tasks
   - `estimatedTotalDistance`: sum of consecutive pick-step proxy distances produced by `estimatePickStepDistance(prev, curr)` — `0` for same location, `0.5` for same zone, `1.0` for inter-zone / missing zone info, plus a `|pathCostScore(prev.type) − pathCostScore(curr.type)| × 0.1` type-delta penalty
@@ -613,7 +616,7 @@ Type constraints enforced at service layer — missing required field → `VALID
 - Collision loop: if `findPaymentByInvoiceNumber(invoiceNumber)` returns a record, increment sequence and retry. Extremely rare in practice.
 
 ### 7-Year Billing Retention
-`retentionExpiresAt = getRetentionExpiryDate(paidAt, RETENTION_YEARS.billing)` set on every PaymentRecord. Purge logic (Prompt 7) will hard-delete records past their retention date.
+Retention is anchored at soft-delete, not creation. `PaymentRecord.retentionExpiresAt` is `null` while the record is active; `DELETE /api/membership/payments/:paymentId` soft-deletes the row (`deletedAt = now`) and sets `retentionExpiresAt = getRetentionExpiryDate(deletedAt, RETENTION_YEARS.billing)` (= deletedAt + 7 years). `POST /api/admin/retention/purge-billing` hard-deletes rows where `retentionExpiresAt < now`.
 
 ### Payment Status Transitions
 ```
@@ -625,7 +628,7 @@ Invalid transitions throw `INVALID_TRANSITION`. Transitions tracked via audit ev
 ### Role Authorization Matrix
 | Operation | MEMBERSHIP_MANAGER | BILLING_MANAGER | SYSTEM_ADMIN |
 |---|---|---|---|
-| Read members | ✓ | ✓ | ✓ |
+| Read members | ✓ | ✗ | ✓ |
 | Create/update members | ✓ | ✗ | ✓ |
 | Delete members (soft) | ✗ | ✗ | ✓ |
 | Read/create packages | ✓ (any auth) | ✓ (any auth) | ✓ |
@@ -747,7 +750,7 @@ src/shared/schemas/admin.schemas.ts   — Fastify JSON Schema definitions for ad
 ### Retention Handling
 
 **7-year billing retention** (`PaymentRecord`):
-- `retentionExpiresAt` is set at payment creation: `getRetentionExpiryDate(paidAt, 7)`.
+- `retentionExpiresAt` is `null` while the payment is active. It is anchored at soft-delete time: `DELETE /api/membership/payments/:paymentId` sets `deletedAt = now` and `retentionExpiresAt = getRetentionExpiryDate(deletedAt, 7)`.
 - Eligible for purge: `deletedAt IS NOT NULL AND retentionExpiresAt < now`.
 - Hard delete via `prisma.paymentRecord.deleteMany(...)` — permanent removal after legal retention window.
 - `isRetentionPurgeable(deletedAt, retentionExpiresAt, now)` in `invariants.ts` checks eligibility without DB access.
@@ -759,8 +762,9 @@ src/shared/schemas/admin.schemas.ts   — Fastify JSON Schema definitions for ad
 
 **Retention endpoints**:
 - `GET /api/admin/retention/report` — counts eligible records in each domain; does not purge.
-- `POST /api/admin/retention/purge-billing` — hard deletes eligible billing records; requires `{ confirm: true }`.
-- `POST /api/admin/retention/purge-operational` — hard deletes old audit events and operation history; requires `{ confirm: true }`.
+- `POST /api/admin/retention/purge-billing` — hard deletes eligible billing records; the body `{ confirm: true }` is enforced at both the schema layer and the service layer (`assertConfirmed`) before any DB work, and `confirmed: true` is written into the purge audit metadata.
+- `POST /api/admin/retention/purge-operational` — hard deletes old audit events and operation history; same two-layer `confirm` enforcement and audit.
+- `POST /api/admin/backup/:snapshotId/restore` — decrypts the snapshot to a staging path; same two-layer `confirm` enforcement and audit.
 
 ### Parameter Dictionary
 
@@ -768,7 +772,7 @@ src/shared/schemas/admin.schemas.ts   — Fastify JSON Schema definitions for ad
 - Keys must match `^[a-zA-Z0-9._:-]+$` — no spaces, no path separators.
 - Read/write/delete access: SYSTEM_ADMIN only.
 - All mutations are audited (CREATE, UPDATE with before/after digest).
-- No soft delete — parameters are hard-deleted.
+- Delete behavior is soft-delete (`deletedAt`, `deletedBy`) with restore-on-recreate by key.
 
 ### IP Allowlist Management
 
@@ -776,9 +780,9 @@ The `IpAllowlistEntry` model stores CIDR-based allowlist rules per `routeGroup` 
 
 CRUD endpoints (`/api/admin/ip-allowlist`) are restricted to SYSTEM_ADMIN.
 
-The `checkIpAllowlist(routeGroup)` factory (already wired in `security.plugin.ts`) reads active entries for the route group at request time and calls `isIpAllowed(ip, entries, { failClosed: config.ipAllowlistStrictMode })`. By default an **empty allowlist permits all IPs** — the allowlist is only enforced once at least one active entry exists for the route group. Setting `IP_ALLOWLIST_STRICT_MODE=true` flips this to **fail-closed**: privileged route groups deny every request until at least one active entry is present.
+The `checkIpAllowlist(routeGroup)` factory (already wired in `security.plugin.ts`) reads active entries for the route group at request time and calls `isIpAllowed(ip, entries, { failClosed: config.ipAllowlistStrictMode })`. The default posture is **fail-closed** (`IP_ALLOWLIST_STRICT_MODE=true`): privileged route groups deny every request until at least one active entry exists. Setting `IP_ALLOWLIST_STRICT_MODE=false` is an explicit opt-out to legacy open-by-default behavior.
 
-New entries are validated for CIDR format before insertion (IP syntax + prefix 0-32 check). The service layer throws `VALIDATION_FAILED` on malformed CIDRs before they reach the database.
+New entries are validated for CIDR format before insertion via strict IPv4 parsing plus canonical prefix checks (e.g., rejects `/08` and `/+8`). The service layer throws `VALIDATION_FAILED` on malformed CIDRs before they reach the database.
 
 **Route-group enforcement scope:** the `ipCheckAdmin = checkIpAllowlist('admin')` pre-handler is wired onto all `/api/admin/*` routes (diagnostics, backup/restore, retention, parameters, ip-allowlist CRUD, key-versions) in addition to `SYSTEM_ADMIN` role checks. If allowlist lookup fails, the middleware denies the request with `500 INTERNAL_ERROR` (fail-closed).
 
@@ -786,7 +790,7 @@ New entries are validated for CIDR format before insertion (IP syntax + prefix 0
 
 `GET /api/admin/key-versions` — lists all ACTIVE and ROTATED key version records.
 
-`POST /api/admin/key-versions/rotate` — triggers rotation:
+`POST /api/admin/key-versions/rotate` — manual rotation trigger:
 1. Finds the current ACTIVE version.
 2. If none exists, creates the initial version (version 1).
 3. If one exists, marks it ROTATED and creates a new ACTIVE version at `currentVersion + 1`.
@@ -795,6 +799,8 @@ New entries are validated for CIDR format before insertion (IP syntax + prefix 0
 6. Writes an audit event.
 
 Re-encryption of existing field-encrypted data is deferred to a dedicated maintenance job outside the current scope. The envelope design (`[keyVersion(4)]` prefix on each encrypted field) keeps legacy ciphertext decryptable after rotation, so gradual rewrap remains safe.
+
+Automatic enforcement is handled by a local scheduler started during app lifecycle hooks. When the active key version is overdue, the scheduler rotates to the next version using the configured interval.
 
 ### Diagnostics Endpoint
 
@@ -834,7 +840,7 @@ The `src/logging/logger.ts` utility provides `createDomainLogger(logger, domain)
 
 **Adoption across the codebase:**
 - Every domain route plugin (auth, warehouse, outbound, strategy, membership, cms, admin) calls `tagRequestLogDomain(fastify, '<domain>')` at its top, so request-scoped logs within `/api/<domain>/*` carry `{ domain }` automatically (including Fastify's own per-request lifecycle logs and the global error handler).
-- Both background schedulers start with a domain-tagged child logger (`createDomainLogger(app.log, 'warehouse' | 'cms')`).
+- Background schedulers start with domain-tagged child loggers (`createDomainLogger(app.log, 'warehouse' | 'cms' | 'admin')`).
 - Backup and retention route handlers create sub-domain child loggers (`'backup'`, `'retention'`) that override the plugin-scoped `'admin'` tag for those specific security-sensitive operations, so restore and purge events are uniquely tagged in production logs.
 
 Usage in service code:

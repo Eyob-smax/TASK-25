@@ -55,7 +55,7 @@ export const simulateBodySchema = {
       minItems: 1,
       maxItems: 10,
     },
-    windowDays: { type: 'integer', minimum: 1, maximum: 90, default: 30 },
+    windowDays: { type: 'integer', enum: [30], default: 30 },
   },
   additionalProperties: false,
 } as const;

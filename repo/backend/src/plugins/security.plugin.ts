@@ -126,8 +126,17 @@ const securityPlugin: FastifyPluginAsync = async (fastify) => {
           );
       }
     } catch (err) {
-      // Rate-limit errors must not break legitimate requests
-      request.log.warn({ err }, 'Rate limit check failed; skipping');
+      request.log.error({ err, principalKey }, 'Rate limit check failed; denying request');
+      await reply
+        .status(503)
+        .send(
+          errorResponse(
+            ErrorCode.INTERNAL_ERROR,
+            'Rate limiting temporarily unavailable',
+            request.id,
+          ),
+        );
+      return;
     }
   });
 

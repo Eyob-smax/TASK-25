@@ -413,6 +413,56 @@ describe('CMS depth — reviewer gating and lifecycle transitions', () => {
     expect(tagIds).not.toContain(fromTagId);
   });
 
+  it('canonicalizes tombstoned tag ids when assigning article tags after merge', async () => {
+    const author = await seedUserWithSession(app, ['WAREHOUSE_OPERATOR']);
+    const reviewer = await seedUserWithSession(app, ['CMS_REVIEWER']);
+
+    const sourceTagId = await createTag(reviewer.token, 'Depth Merge Source');
+    const targetTagId = await createTag(reviewer.token, 'Depth Merge Target');
+    const articleId = await createDraftArticle(author.token);
+
+    const merge = await app.inject({
+      method: 'POST',
+      url: '/api/cms/tags/merge',
+      headers: authHeader(reviewer.token),
+      payload: { sourceTagId, targetTagId },
+    });
+    expect(merge.statusCode).toBe(200);
+
+    const patch = await app.inject({
+      method: 'PATCH',
+      url: `/api/cms/articles/${articleId}`,
+      headers: authHeader(author.token),
+      payload: { tagIds: [sourceTagId] },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const article = await app.inject({
+      method: 'GET',
+      url: `/api/cms/articles/${articleId}`,
+      headers: authHeader(author.token),
+    });
+    expect(article.statusCode).toBe(200);
+
+    const assignedTagIds = (JSON.parse(article.payload).data.tags as Array<{ tag: { id: string } }>).map((t) => t.tag.id);
+    expect(assignedTagIds).toContain(targetTagId);
+    expect(assignedTagIds).not.toContain(sourceTagId);
+  });
+
+  it('returns 400 for invalid article payload when authenticated', async () => {
+    const author = await seedUserWithSession(app, ['WAREHOUSE_OPERATOR']);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/cms/articles',
+      headers: authHeader(author.token),
+      payload: { slug: `missing-title-${randomUUID().slice(0, 6)}`, body: 'Body only' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.payload).error.code).toBe('VALIDATION_FAILED');
+  });
+
   it('returns populated list payloads for articles, categories, and tags', async () => {
     const author = await seedUserWithSession(app, ['WAREHOUSE_OPERATOR']);
     const reviewer = await seedUserWithSession(app, ['CMS_REVIEWER']);

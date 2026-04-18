@@ -52,4 +52,19 @@ describe('digestObject', () => {
     const after = { user: { id: 'u1', passwordVersion: 2 } };
     expect(digestObject(before)).not.toBe(digestObject(after));
   });
+
+  it('session-create audit after-state shape produces a deterministic non-empty digest', () => {
+    // Mirror of the payload written by auth.routes.ts on successful login.
+    const afterState = {
+      userId: 'user-1',
+      tokenHashPrefix: '0123456789abcdef',
+      expiresAt: '2026-04-18T12:00:00.000Z',
+      passwordVersion: 3,
+    };
+    const digest = digestObject(afterState);
+    expect(digest).toHaveLength(64);
+    expect(/^[0-9a-f]+$/.test(digest)).toBe(true);
+    // Deterministic across invocations.
+    expect(digestObject(afterState)).toBe(digest);
+  });
 });

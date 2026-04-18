@@ -225,4 +225,34 @@ describe('Strategy depth — role authorization and DB-backed happy paths', () =
     expect(typeof body.data.totalTasks).toBe('number');
     expect(Array.isArray(body.data.results)).toBe(true);
   });
+
+  it('rejects simulation when windowDays is not 30', async () => {
+    const strategyManager = await seedUserWithSession(app, ['STRATEGY_MANAGER']);
+    const { facility } = await seedFacilityLocationAndSku();
+
+    const createRuleset = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/rulesets',
+      headers: authHeader(strategyManager.token),
+      payload: {
+        name: `Sim Ruleset Strict ${randomUUID().slice(0, 8)}`,
+      },
+    });
+    expect(createRuleset.statusCode).toBe(201);
+    const rulesetId = JSON.parse(createRuleset.payload).data.id as string;
+
+    const simulate = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/simulate',
+      headers: authHeader(strategyManager.token),
+      payload: {
+        facilityId: facility.id,
+        rulesetIds: [rulesetId],
+        windowDays: 14,
+      },
+    });
+
+    expect(simulate.statusCode).toBe(400);
+    expect(JSON.parse(simulate.payload).error.code).toBe('VALIDATION_FAILED');
+  });
 });

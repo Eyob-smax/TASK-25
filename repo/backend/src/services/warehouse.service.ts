@@ -324,7 +324,7 @@ export async function transitionAppointment(
   appointmentId: string,
   newState: string,
   actor: string,
-  reason?: string,
+  reason: string,
   extra?: { scheduledAt?: Date },
 ) {
   const appointment = await findAppointmentById(prisma, appointmentId);
@@ -337,6 +337,13 @@ export async function transitionAppointment(
     throw new WarehouseServiceError(
       ErrorCode.INVALID_TRANSITION,
       `Cannot transition appointment from '${from}' to '${newState}'`,
+    );
+  }
+
+  if (!reason || reason.trim().length === 0) {
+    throw new WarehouseServiceError(
+      ErrorCode.VALIDATION_FAILED,
+      'Transition reason is required',
     );
   }
 
@@ -359,9 +366,9 @@ export async function transitionAppointment(
     actor,
     priorState: appointment.state,
     newState,
-    reason,
+    reason: reason.trim(),
   });
-  await auditTransition(prisma, actor, 'Appointment', appointmentId, appointment.state, newState, { reason });
+  await auditTransition(prisma, actor, 'Appointment', appointmentId, appointment.state, newState, { reason: reason.trim() });
 
   return findAppointmentById(prisma, appointmentId);
 }

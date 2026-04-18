@@ -143,4 +143,26 @@ describe('loadConfig', () => {
     const config = loadConfig({ NODE_ENV: 'test', IP_ALLOWLIST_STRICT_MODE: 'false' });
     expect(config.ipAllowlistStrictMode).toBe(false);
   });
+
+  it('enables key rotation scheduler by default', () => {
+    const config = loadConfig({ NODE_ENV: 'test' });
+    expect(config.keyRotationSchedulerEnabled).toBe(true);
+    expect(config.keyRotationCheckIntervalMs).toBe(86_400_000);
+  });
+
+  it('disables key rotation scheduler when KEY_ROTATION_SCHEDULER_ENABLED=false', () => {
+    const config = loadConfig({
+      NODE_ENV: 'test',
+      KEY_ROTATION_SCHEDULER_ENABLED: 'false',
+    });
+    expect(config.keyRotationSchedulerEnabled).toBe(false);
+  });
+
+  it('reads key rotation scheduler interval from env', () => {
+    const config = loadConfig({
+      NODE_ENV: 'test',
+      KEY_ROTATION_CHECK_INTERVAL_MS: '60000',
+    });
+    expect(config.keyRotationCheckIntervalMs).toBe(60_000);
+  });
 });

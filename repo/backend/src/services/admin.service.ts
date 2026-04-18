@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import type { PrismaClient } from '@prisma/client';
 import { encryptBuffer, decryptBuffer } from '../security/encryption.js';
+import { ipv4ToUint32 } from '../security/ipallowlist.js';
 import { validateSnapshotPath } from '../shared/invariants.js';
 import { auditCreate, auditUpdate, auditTransition } from '../audit/audit.js';
 import { ErrorCode } from '../shared/envelope.js';
@@ -20,14 +21,16 @@ import {
   updateBackupSnapshot,
   createParameter,
   findParameterByKey,
+  findParameterByKeyIncludingDeleted,
   listParameters,
+  restoreParameter,
   updateParameter,
-  deleteParameter,
+  softDeleteParameter,
   createIpAllowlistEntry,
   findIpAllowlistEntryById,
   listIpAllowlistEntries,
   updateIpAllowlistEntry,
-  deleteIpAllowlistEntry,
+  softDeleteIpAllowlistEntry,
   countEligibleBillingRecords,
   purgeEligibleBillingRecords,
   countOldAuditEvents,
@@ -60,19 +63,36 @@ function operationalCutoff(now: Date): Date {
   );
 }
 
-function isValidCidrFormat(cidr: string): boolean {
-  if (!cidr.includes('/')) {
-    return /^(\d{1,3}\.){3}\d{1,3}$/.test(cidr);
+function assertConfirmed(confirm: boolean, actionLabel: string): void {
+  if (confirm !== true) {
+    throw new AdminServiceError(
+      ErrorCode.VALIDATION_FAILED,
+      `Explicit confirmation required for ${actionLabel}`,
+    );
   }
-  const slashIdx = cidr.lastIndexOf('/');
-  const ip = cidr.slice(0, slashIdx);
-  const prefixNum = parseInt(cidr.slice(slashIdx + 1), 10);
-  return (
-    /^(\d{1,3}\.){3}\d{1,3}$/.test(ip) &&
-    !isNaN(prefixNum) &&
-    prefixNum >= 0 &&
-    prefixNum <= 32
-  );
+}
+
+function isValidCidrFormat(cidr: string): boolean {
+  try {
+    if (!cidr.includes('/')) {
+      ipv4ToUint32(cidr);
+      return true;
+    }
+
+    const slashIdx = cidr.lastIndexOf('/');
+    const ip = cidr.slice(0, slashIdx);
+    const prefixRaw = cidr.slice(slashIdx + 1);
+    const prefixNum = parseInt(prefixRaw, 10);
+
+    // Reject non-canonical prefixes like "08" or "+1".
+    if (String(prefixNum) !== prefixRaw) return false;
+    if (isNaN(prefixNum) || prefixNum < 0 || prefixNum > 32) return false;
+
+    ipv4ToUint32(ip);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ---- Backup ----
@@ -148,7 +168,9 @@ export async function restoreBackup(
   backupDir: string,
   masterKey: Buffer,
   actorId: string,
+  confirm: boolean,
 ) {
+  assertConfirmed(confirm, 'backup restore');
   const snapshot = await findBackupSnapshotById(prisma, snapshotId);
   if (!snapshot) throw new AdminServiceError(ErrorCode.NOT_FOUND, 'Backup snapshot not found');
 
@@ -217,7 +239,10 @@ export async function restoreBackup(
     restoredBy: actorId,
   });
 
-  await auditTransition(prisma, actorId, 'BackupSnapshot', snapshotId, 'COMPLETED', 'RESTORED');
+  await auditTransition(prisma, actorId, 'BackupSnapshot', snapshotId, 'COMPLETED', 'RESTORED', {
+    confirmed: true,
+    stagingPath,
+  });
 
   return {
     snapshotId,
@@ -245,7 +270,7 @@ export async function getRetentionReport(prisma: PrismaClient) {
       eligibleForPurge: billingEligible,
       retentionYears: RETENTION_YEARS.billing,
       policy:
-        'Hard delete soft-deleted PaymentRecord rows where retentionExpiresAt < now',
+        'Hard delete soft-deleted PaymentRecord rows whose retentionExpiresAt is in the past (deletedAt + 7y anchor)',
     },
     operational: {
       cutoffDate: cutoff.toISOString(),
@@ -258,18 +283,30 @@ export async function getRetentionReport(prisma: PrismaClient) {
   };
 }
 
-export async function purgeBillingRecords(prisma: PrismaClient, actorId: string) {
+export async function purgeBillingRecords(
+  prisma: PrismaClient,
+  actorId: string,
+  confirm: boolean,
+) {
+  assertConfirmed(confirm, 'billing retention purge');
   const now = new Date();
   const result = await purgeEligibleBillingRecords(prisma, now);
   await auditCreate(prisma, actorId, 'RetentionPurge', 'billing', {
     domain: 'billing',
+    confirmed: true,
     purgedCount: result.count,
+    criterion: 'retentionExpiresAt < now',
     purgedAt: now.toISOString(),
   });
   return { domain: 'billing', purgedCount: result.count, purgedAt: now.toISOString() };
 }
 
-export async function purgeOperationalLogs(prisma: PrismaClient, actorId: string) {
+export async function purgeOperationalLogs(
+  prisma: PrismaClient,
+  actorId: string,
+  confirm: boolean,
+) {
+  assertConfirmed(confirm, 'operational retention purge');
   const now = new Date();
   const cutoff = operationalCutoff(now);
 
@@ -281,6 +318,7 @@ export async function purgeOperationalLogs(prisma: PrismaClient, actorId: string
   // New audit event has current timestamp — not subject to the purge window
   await auditCreate(prisma, actorId, 'RetentionPurge', 'operational', {
     domain: 'operational',
+    confirmed: true,
     cutoffDate: cutoff.toISOString(),
     auditEventsPurged: auditResult.count,
     operationHistoryPurged: historyResult.count,
@@ -317,6 +355,32 @@ export async function setParameter(
   if (existing) {
     throw new AdminServiceError(ErrorCode.CONFLICT, `Parameter '${data.key}' already exists`);
   }
+
+  const existingIncludingDeleted = await findParameterByKeyIncludingDeleted(prisma, data.key);
+  if (existingIncludingDeleted?.deletedAt) {
+    const restored = await restoreParameter(prisma, data.key, { ...data, updatedBy: actorId });
+    await auditUpdate(
+      prisma,
+      actorId,
+      'Parameter',
+      restored.id,
+      {
+        value: existingIncludingDeleted.value,
+        description: existingIncludingDeleted.description,
+        deletedAt: existingIncludingDeleted.deletedAt?.toISOString() ?? null,
+        deletedBy: existingIncludingDeleted.deletedBy,
+      },
+      {
+        value: restored.value,
+        description: restored.description,
+        deletedAt: null,
+        deletedBy: null,
+      },
+      { reason: 'restore-soft-deleted-parameter', key: data.key },
+    );
+    return restored;
+  }
+
   const param = await createParameter(prisma, { ...data, updatedBy: actorId });
   await auditCreate(prisma, actorId, 'Parameter', param.id, { key: param.key });
   return param;
@@ -345,7 +409,7 @@ export async function updateParameterValue(
 export async function removeParameter(prisma: PrismaClient, key: string, actorId: string) {
   const existing = await findParameterByKey(prisma, key);
   if (!existing) throw new AdminServiceError(ErrorCode.NOT_FOUND, `Parameter '${key}' not found`);
-  await deleteParameter(prisma, key);
+  await softDeleteParameter(prisma, key, actorId);
   await auditUpdate(prisma, actorId, 'Parameter', existing.id, { key }, { deleted: true });
 }
 
@@ -401,14 +465,14 @@ export async function removeIpAllowlistEntry(
 ) {
   const entry = await findIpAllowlistEntryById(prisma, entryId);
   if (!entry) throw new AdminServiceError(ErrorCode.NOT_FOUND, 'IP allowlist entry not found');
-  await deleteIpAllowlistEntry(prisma, entryId);
+  await softDeleteIpAllowlistEntry(prisma, entryId, actorId);
   await auditUpdate(
     prisma,
     actorId,
     'IpAllowlistEntry',
     entryId,
     { cidr: entry.cidr, isActive: entry.isActive },
-    { deleted: true },
+    { deleted: true, isActive: false },
   );
 }
 
